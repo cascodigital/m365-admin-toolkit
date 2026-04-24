@@ -106,7 +106,7 @@ foreach ($item in $Mapeamento) {
     foreach ($f in $allFiles) {
         $localFile = Join-Path $localRoot $f.RelPath
 
-        if (-not (Test-Path $localFile)) {
+        if (-not (Test-Path -LiteralPath $localFile)) {
             if ($ModoReal) {
                 try {
                     Remove-MgDriveItem -DriveId $drive.Id -DriveItemId $f.Id -ErrorAction Stop
