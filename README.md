@@ -17,6 +17,7 @@ m365-admin-toolkit/
 ├── exchange/          # Gestao de correio e aliases
 ├── security/          # MFA, senhas e Security Defaults
 ├── audit/             # Logs de logon, busca de arquivos e eventos
+├── sharepoint/        # Gestao e sincronizacao de SharePoint/OneDrive
 ├── tools/             # Utilitarios (keyboard, ping, Office removal)
 └── gpo/               # GPO exportada para auditoria de logons (importavel)
 ```
@@ -45,6 +46,12 @@ m365-admin-toolkit/
 | `Get-LogonEvents.ps1` | Analise forense de eventos 4624 em multiplos hosts |
 | `Search-Files.ps1` | Busca arquivos em OneDrive por nome, extensao ou conteudo |
 | `Search-Events.ps1` | Analisa logs Windows por Event ID com export Excel |
+
+## SharePoint
+
+| Script | Descricao |
+|--------|-----------|
+| `Sync-SharePointDeletion.ps1` | Deleta do SharePoint arquivos ausentes na fonte local. Util apos migracoes via SharePoint Migration Tool para manter destino em sincronia com a origem (pasta local, share de rede, OneDrive etc). Possui modo simulacao antes de executar de verdade. |
 
 ## Tools
 
@@ -86,6 +93,7 @@ Todos os scripts possuem prompts interativos e documentacao interna.
 
 - **`Set-M365Passwords.ps1`** gera CSV com senhas em texto claro — armazene com seguranca
 - **`Remove-Email.ps1`** executa purge irreversivel — teste antes em ambiente controlado
+- **`Sync-SharePointDeletion.ps1`** deleta arquivos permanentemente — sempre rode em modo simulacao primeiro (`$ModoReal = $false`)
 - **`Remove-Office.ps1`** faz remocao agressiva — avise usuarios antes de executar
 
 ---
