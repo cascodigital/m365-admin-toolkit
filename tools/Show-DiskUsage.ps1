@@ -188,10 +188,12 @@ function Build-Children($node) {
         }
     } catch {}
 
+    $sorted  = @($items | Sort-Object Size -Descending)
+    $maxSize = if ($sorted.Count -gt 0) { [long]$sorted[0].Size } else { 0 }
     $shown = 0
-    foreach ($c in ($items | Sort-Object Size -Descending)) {
+    foreach ($c in $sorted) {
         if ($shown -ge $MAX_CHILDREN) {
-            [void]$node.Nodes.Add((New-Object System.Windows.Forms.TreeNode("... (+$($items.Count - $shown) itens nao exibidos)")))
+            [void]$node.Nodes.Add((New-Object System.Windows.Forms.TreeNode("... (+$($sorted.Count - $shown) itens nao exibidos)")))
             break
         }
         $pct = if ($parentSize -gt 0) { 100.0 * $c.Size / $parentSize } else { 0 }
@@ -199,6 +201,12 @@ function Build-Children($node) {
         $tn = New-Object System.Windows.Forms.TreeNode
         $tn.Text = ('{0} {1}  {2}  ({3:N1}%)' -f $icon, $c.Name, (Format-Size $c.Size), $pct)
         $tn.Name = $c.Path     # caminho completo (para Explorer/Copiar/Deletar e re-expansao)
+        # Degrade pastel relativo ao maior irmao: vermelho = maior, verde = menor.
+        # Canal minimo 200 mantem o fundo claro, entao o texto preto continua legivel.
+        $frac = if ($maxSize -gt 0) { [double]$c.Size / $maxSize } else { 0 }
+        $r = [int][math]::Min(255, 200 + 110 * $frac)
+        $g = [int][math]::Min(255, 200 + 110 * (1 - $frac))
+        $tn.BackColor = [System.Drawing.Color]::FromArgb($r, $g, 200)
         if ($c.IsDir) { [void]$tn.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...'))) }
         [void]$node.Nodes.Add($tn)
         $shown++
