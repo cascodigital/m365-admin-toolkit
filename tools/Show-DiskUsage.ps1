@@ -50,82 +50,83 @@ try {
 $cs = @'
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace CascoDigital {
   public class DiskWalker {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct FIND_DATA {
-      public uint Attr;
-      public long Creation;
-      public long LastAccess;
-      public long LastWrite;
-      public uint SizeHigh;
-      public uint SizeLow;
-      public uint Reserved0;
-      public uint Reserved1;
-      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
-      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]  public string Alt;
-    }
-
-    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern IntPtr FindFirstFileW(string path, out FIND_DATA data);
-    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool FindNextFileW(IntPtr h, out FIND_DATA data);
-    [DllImport("kernel32", SetLastError = true)]
-    static extern bool FindClose(IntPtr h);
     [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern uint GetCompressedFileSizeW(string path, out uint high);
 
     const uint INVALID_SIZE = 0xFFFFFFFF;
-    const uint FA_DIR     = 0x00000010;
-    const uint FA_REPARSE = 0x00000400;
-    static readonly IntPtr INVALID_HANDLE = new IntPtr(-1);
+    const long SANITY_CAP   = 0x4000000000000L; // 1 PB: tamanho maior que isso num arquivo = lixo
 
     public Dictionary<string, long> DirSize =
         new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     public long FileCount;
 
-    // Prefixo \\?\ para vencer o limite de MAX_PATH (260)
+    // Prefixo \\?\ para vencer o limite de MAX_PATH (260) na chamada de tamanho
     static string Long(string p) {
-      if (p.StartsWith("\\\\")) return "\\\\?\\UNC\\" + p.Substring(2);
+      if (p.StartsWith("\\\\?\\")) return p;
+      if (p.StartsWith("\\\\"))    return "\\\\?\\UNC\\" + p.Substring(2);
       return "\\\\?\\" + p;
     }
 
-    // Varre uma subarvore de forma ITERATIVA (pilha explicita, sem recursao -> sem StackOverflow).
-    // Soma o alocado fisico, cacheia o total recursivo por pasta e devolve o total da subarvore.
+    // Normaliza a chave do cache. "C:\" e "C:" viram "C:"; demais perdem a barra final.
+    static string Key(string p) {
+      p = p.TrimEnd('\\');
+      return p;
+    }
+
+    // Tamanho FISICO alocado de um arquivo, direto do Windows. 0 se falhar ou vier lixo.
+    public long FileAlloc(string path) {
+      uint high;
+      uint low = GetCompressedFileSizeW(Long(path), out high);
+      if (low == INVALID_SIZE && Marshal.GetLastWin32Error() != 0) return 0;
+      long v = ((long)high << 32) | (long)low;
+      if (v < 0 || v > SANITY_CAP) return 0;
+      return v;
+    }
+
+    public long DirAlloc(string path) {
+      long v;
+      return DirSize.TryGetValue(Key(path), out v) ? v : 0;
+    }
+
+    // Varre uma subarvore ITERATIVAMENTE (pilha explicita -> sem StackOverflow), usando a
+    // enumeracao nativa do .NET (DirectoryInfo) para percorrer e GetCompressedFileSize para medir.
     public long ScanTree(string root) {
-      root = root.TrimEnd('\\');
+      string r = Key(root);
       Dictionary<string, long>   direct = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
       Dictionary<string, string> parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
       List<string> order = new List<string>();
       Stack<string> stack = new Stack<string>();
-      direct[root] = 0; order.Add(root); stack.Push(root);
+      direct[r] = 0; order.Add(r); stack.Push(r);
 
       while (stack.Count > 0) {
         string dir = stack.Pop();
         long files = 0;
-        FIND_DATA fd;
-        IntPtr h = FindFirstFileW(Long(dir) + "\\*", out fd);
-        if (h == INVALID_HANDLE) { continue; }    // acesso negado / pasta sumiu -> ignora
         try {
-          do {
-            string name = fd.Name;
-            if (name == "." || name == "..") continue;
-            string full = dir + "\\" + name;
-            bool isDir     = (fd.Attr & FA_DIR) != 0;
-            bool isReparse = (fd.Attr & FA_REPARSE) != 0;
+          // "C:" precisa virar "C:\" para o DirectoryInfo apontar para a raiz, nao o dir atual
+          string dpath = (dir.Length == 2 && dir[1] == ':') ? dir + "\\" : dir;
+          DirectoryInfo di = new DirectoryInfo(dpath);
+          foreach (FileSystemInfo fsi in di.EnumerateFileSystemInfos()) {
+            FileAttributes a;
+            try { a = fsi.Attributes; } catch { continue; }
+            bool isDir = (a & FileAttributes.Directory)     != 0;
+            bool isRep = (a & FileAttributes.ReparsePoint)  != 0;
             if (isDir) {
-              if (isReparse) continue;             // junction/symlink: nao percorre
+              if (isRep) continue;                 // junction/symlink: nao percorre
+              string full = Key(fsi.FullName);
               if (!direct.ContainsKey(full)) {     // guarda contra qualquer ciclo
                 direct[full] = 0; parent[full] = dir; order.Add(full); stack.Push(full);
               }
             } else {
-              files += AllocOf(full, fd.SizeHigh, fd.SizeLow);
+              files += FileAlloc(fsi.FullName);
               FileCount++;
             }
-          } while (FindNextFileW(h, out fd));
-        } finally { FindClose(h); }
+          }
+        } catch { }                                // acesso negado / caminho longo: ignora a pasta
         direct[dir] = files;                       // bytes dos arquivos diretos desta pasta
       }
 
@@ -135,29 +136,7 @@ namespace CascoDigital {
         string d = order[i], p;
         if (parent.TryGetValue(d, out p)) DirSize[p] += DirSize[d];
       }
-      long t; return DirSize.TryGetValue(root, out t) ? t : 0;
-    }
-
-    long AllocOf(string path, uint logHigh, uint logLow) {
-      uint high;
-      uint low = GetCompressedFileSizeW(Long(path), out high);
-      if (low == INVALID_SIZE && Marshal.GetLastWin32Error() != 0) {
-        // Falhou (acesso negado etc): cai pro tamanho logico do FindData
-        return ((long)logHigh << 32) | logLow;
-      }
-      return ((long)high << 32) | low;
-    }
-
-    public long DirAlloc(string path) {
-      long v;
-      return DirSize.TryGetValue(path.TrimEnd('\\'), out v) ? v : 0;
-    }
-
-    public long FileAlloc(string path) {
-      uint high;
-      uint low = GetCompressedFileSizeW(Long(path), out high);
-      if (low == INVALID_SIZE && Marshal.GetLastWin32Error() != 0) return 0;
-      return ((long)high << 32) | low;
+      long t; return DirSize.TryGetValue(r, out t) ? t : 0;
     }
   }
 }
@@ -308,7 +287,7 @@ $btn.Add_Click({
     $sw.Stop()
 
     $rootNode = New-Object System.Windows.Forms.TreeNode
-    $rootNode.Name = $rootKey
+    $rootNode.Name = $root   # caminho completo COM barra ("C:\"); "C:" sem barra = dir atual da unidade
     $rootNode.Text = ('[DIR] {0}  {1}  (100%)' -f $root, (Format-Size $total))
     [void]$rootNode.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...')))
     [void]$tree.Nodes.Add($rootNode)
