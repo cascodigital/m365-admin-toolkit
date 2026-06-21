@@ -141,7 +141,10 @@ namespace CascoDigital {
   }
 }
 '@
-Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop
+# Compila so uma vez por sessao (rodar de novo na mesma janela nao recompila -> sem TYPE_ALREADY_EXISTS)
+if (-not ([System.Management.Automation.PSTypeName]'CascoDigital.DiskWalker').Type) {
+    Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop
+}
 
 # ============================================================================
 #  Estado e helpers
