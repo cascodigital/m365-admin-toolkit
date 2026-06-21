@@ -92,31 +92,50 @@ namespace CascoDigital {
       return "\\\\?\\" + p;
     }
 
-    // Varre recursivamente um diretorio, soma o alocado fisico e cacheia por pasta. Retorna o total.
-    public long ScanDir(string dir) {
-      dir = dir.TrimEnd('\\');
-      long total = 0;
-      FIND_DATA fd;
-      IntPtr h = FindFirstFileW(Long(dir) + "\\*", out fd);
-      if (h == INVALID_HANDLE) { DirSize[dir] = 0; return 0; }
-      try {
-        do {
-          string name = fd.Name;
-          if (name == "." || name == "..") continue;
-          string full = dir + "\\" + name;
-          bool isDir     = (fd.Attr & FA_DIR) != 0;
-          bool isReparse = (fd.Attr & FA_REPARSE) != 0;
-          if (isDir) {
-            if (isReparse) { DirSize[full] = 0; continue; } // nao desce em junction/symlink
-            total += ScanDir(full);
-          } else {
-            total += AllocOf(full, fd.SizeHigh, fd.SizeLow);
-            FileCount++;
-          }
-        } while (FindNextFileW(h, out fd));
-      } finally { FindClose(h); }
-      DirSize[dir] = total;
-      return total;
+    // Varre uma subarvore de forma ITERATIVA (pilha explicita, sem recursao -> sem StackOverflow).
+    // Soma o alocado fisico, cacheia o total recursivo por pasta e devolve o total da subarvore.
+    public long ScanTree(string root) {
+      root = root.TrimEnd('\\');
+      Dictionary<string, long>   direct = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+      Dictionary<string, string> parent = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+      List<string> order = new List<string>();
+      Stack<string> stack = new Stack<string>();
+      direct[root] = 0; order.Add(root); stack.Push(root);
+
+      while (stack.Count > 0) {
+        string dir = stack.Pop();
+        long files = 0;
+        FIND_DATA fd;
+        IntPtr h = FindFirstFileW(Long(dir) + "\\*", out fd);
+        if (h == INVALID_HANDLE) { continue; }    // acesso negado / pasta sumiu -> ignora
+        try {
+          do {
+            string name = fd.Name;
+            if (name == "." || name == "..") continue;
+            string full = dir + "\\" + name;
+            bool isDir     = (fd.Attr & FA_DIR) != 0;
+            bool isReparse = (fd.Attr & FA_REPARSE) != 0;
+            if (isDir) {
+              if (isReparse) continue;             // junction/symlink: nao percorre
+              if (!direct.ContainsKey(full)) {     // guarda contra qualquer ciclo
+                direct[full] = 0; parent[full] = dir; order.Add(full); stack.Push(full);
+              }
+            } else {
+              files += AllocOf(full, fd.SizeHigh, fd.SizeLow);
+              FileCount++;
+            }
+          } while (FindNextFileW(h, out fd));
+        } finally { FindClose(h); }
+        direct[dir] = files;                       // bytes dos arquivos diretos desta pasta
+      }
+
+      // Rollup do mais fundo pro mais raso: cada pasta soma seu total ao pai.
+      for (int i = 0; i < order.Count; i++) DirSize[order[i]] = direct[order[i]];
+      for (int i = order.Count - 1; i >= 0; i--) {
+        string d = order[i], p;
+        if (parent.TryGetValue(d, out p)) DirSize[p] += DirSize[d];
+      }
+      long t; return DirSize.TryGetValue(root, out t) ? t : 0;
     }
 
     long AllocOf(string path, uint logHigh, uint logLow) {
@@ -279,7 +298,7 @@ $btn.Add_Click({
         if (Test-Reparse $d) { continue }
         $lbl.Text = "Varrendo $($d.FullName) ...  ($($script:Walker.FileCount) arquivos ate agora)"
         [System.Windows.Forms.Application]::DoEvents()
-        $total += $script:Walker.ScanDir($d.FullName)
+        $total += $script:Walker.ScanTree($d.FullName)
     }
     # Arquivos soltos na raiz
     foreach ($f in (Get-ChildItem -LiteralPath $root -File -Force -ErrorAction SilentlyContinue)) {
