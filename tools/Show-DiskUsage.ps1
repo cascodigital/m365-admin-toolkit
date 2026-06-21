@@ -1,24 +1,24 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-    Show-DiskUsage.ps1 - Visualizador de uso de disco estilo TreeSize/WizTree em PowerShell + WinForms.
+    Show-DiskUsage.ps1 - Visualizador de uso de disco estilo TreeSize em PowerShell + WinForms.
     Solucao propria, sem instalar software de terceiros (compliance-safe).
 
 .DESCRIPTION
-    Le a Master File Table ($MFT) crua do volume NTFS (mesma tecnica do WizTree) -> scan do disco
-    inteiro em segundos, nao minutos. Apos o scan, a navegacao e instantanea.
+    Pergunta ao proprio Windows o tamanho FISICO alocado de cada arquivo (GetCompressedFileSizeW).
+    Com isso o numero bate com a coluna "Allocated" do TreeSize/WizTree:
+      - compressao NTFS, arquivos sparse e hardlinks sao tratados pelo SO (sem chute);
+      - arquivos so-na-nuvem (OneDrive Files On-Demand, desidratados) alocam ~0 e saem da conta;
+      - junctions/symlinks (reparse points de diretorio) nao sao percorridos (evita dupla contagem).
 
-    - Auto-eleva para Administrador (obrigatorio para abrir o handle do volume)
-    - Modo MFT: scan ultra-rapido de volumes NTFS locais (C:, D:, ...)
-    - Fallback automatico para enumeracao classica (Get-ChildItem) se a MFT nao puder ser lida
-      (volumes de rede, ReFS/FAT, falha de acesso)
     - Maior sempre no topo, com percentual relativo ao pai
-    - Mostra pastas E arquivos
+    - Mostra pastas E arquivos; arvore navegavel (expansao instantanea via cache)
     - Menu de contexto (botao direito): Abrir no Explorer / Copiar caminho / Deletar (com confirmacao)
 
 .NOTES
-    Requer Administrador e PowerShell 5.1+. O modo MFT so funciona em volume NTFS local fixo.
-    A MFT entrega o tamanho logico (real) dos dados.
+    Requer Administrador e PowerShell 5.1+. A varredura percorre o filesystem (mais lenta que ler a
+    MFT crua: 1-3 min para C: inteiro), em troca de um numero fisico confiavel. A GUI fica ocupada
+    durante a varredura; o status mostra qual pasta de topo esta sendo processada.
 
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
@@ -44,306 +44,112 @@ Add-Type -AssemblyName System.Drawing
 try {
 
 # ============================================================================
-#  Parser nativo da $MFT (NTFS) em C#. Le o volume cru e reconstroi a arvore.
+#  Motor: varre o filesystem e pega o tamanho FISICO alocado de cada arquivo
+#  diretamente do Windows (GetCompressedFileSizeW). Sem parsear NTFS na mao.
 # ============================================================================
 $cs = @'
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Text;
 using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
 
 namespace CascoDigital {
-  public class MftNode {
-    public long Index;
-    public long Parent;
-    public string Name;
-    public long Size;           // tamanho proprio (arquivo); pasta = 0
-    public long RecursiveSize;  // soma recursiva (pasta); arquivo = Size
-    public bool IsDir;
-    public long Display { get { return IsDir ? RecursiveSize : Size; } }
-  }
-
-  public class MftScanner {
-    public const long ROOT = 5;
-    public char Drive;
-    public Dictionary<long, MftNode> Nodes = new Dictionary<long, MftNode>();
-    public Dictionary<long, List<long>> Kids = new Dictionary<long, List<long>>();
-    public int FileCount;
-
-    [DllImport("kernel32", SetLastError = true, CharSet = CharSet.Auto)]
-    static extern SafeFileHandle CreateFile(string name, uint access, uint share,
-        IntPtr sec, uint disp, uint flags, IntPtr templ);
-
-    static ushort U16(byte[] b, int o) { return BitConverter.ToUInt16(b, o); }
-    static uint   U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
-    static long   I64(byte[] b, int o) { return BitConverter.ToInt64(b, o); }
-
-    public static MftScanner Scan(char drive) {
-      MftScanner s = new MftScanner();
-      s.Drive = char.ToUpper(drive);
-      string vol = "\\\\.\\" + s.Drive + ":";
-      SafeFileHandle h = CreateFile(vol, 0x80000000, 0x00000003, IntPtr.Zero, 3, 0, IntPtr.Zero);
-      if (h.IsInvalid) throw new IOException("CreateFile falhou no volume " + vol + " (erro " + Marshal.GetLastWin32Error() + ")");
-
-      using (FileStream fs = new FileStream(h, FileAccess.Read)) {
-        // --- Boot sector / BPB ---
-        byte[] boot = new byte[512];
-        fs.Seek(0, SeekOrigin.Begin);
-        ReadFull(fs, boot, 0, 512);
-        if (boot[3] != (byte)'N' || boot[4] != (byte)'T' || boot[5] != (byte)'F' || boot[6] != (byte)'S')
-          throw new IOException("Volume nao e NTFS.");
-
-        int bytesPerSector = U16(boot, 0x0B);
-        int secsPerCluster = boot[0x0D];
-        long bytesPerCluster = (long)bytesPerSector * secsPerCluster;
-        long mftLcn = I64(boot, 0x30);
-        sbyte cpr = (sbyte)boot[0x40];
-        int recSize = cpr > 0 ? (int)(cpr * bytesPerCluster) : (1 << (-cpr));
-
-        // --- Record 0 ($MFT) para descobrir os extents da propria MFT ---
-        byte[] rec0 = new byte[recSize];
-        fs.Seek(mftLcn * bytesPerCluster, SeekOrigin.Begin);
-        ReadFull(fs, rec0, 0, recSize);
-        ApplyFixup(rec0, bytesPerSector);
-        List<long[]> extents = ParseMftDataRuns(rec0, bytesPerCluster); // [diskOffset, byteLength]
-
-        // --- Itera todos os registros da MFT lendo os extents em blocos ---
-        byte[] rec = new byte[recSize];
-        long index = 0;
-        const int CHUNK = 8 * 1024 * 1024;
-        byte[] buf = new byte[CHUNK];
-
-        foreach (long[] ex in extents) {
-          long off = ex[0];
-          long remaining = ex[1];
-          fs.Seek(off, SeekOrigin.Begin);
-          while (remaining > 0) {
-            int want = (int)Math.Min((long)CHUNK, remaining);
-            want -= want % recSize;
-            if (want <= 0) break;
-            ReadFull(fs, buf, 0, want);
-            remaining -= want;
-            for (int p = 0; p + recSize <= want; p += recSize, index++) {
-              Buffer.BlockCopy(buf, p, rec, 0, recSize);
-              s.ParseRecord(rec, index, bytesPerSector);
-            }
-          }
-        }
-      }
-
-      s.Rollup();
-      s.BuildKids();
-      return s;
+  public class DiskWalker {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct FIND_DATA {
+      public uint Attr;
+      public long Creation;
+      public long LastAccess;
+      public long LastWrite;
+      public uint SizeHigh;
+      public uint SizeLow;
+      public uint Reserved0;
+      public uint Reserved1;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Name;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]  public string Alt;
     }
 
-    static void ReadFull(FileStream fs, byte[] b, int off, int count) {
-      int got = 0;
-      while (got < count) {
-        int n = fs.Read(b, off + got, count - got);
-        if (n <= 0) throw new IOException("Leitura do volume terminou cedo.");
-        got += n;
-      }
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr FindFirstFileW(string path, out FIND_DATA data);
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool FindNextFileW(IntPtr h, out FIND_DATA data);
+    [DllImport("kernel32", SetLastError = true)]
+    static extern bool FindClose(IntPtr h);
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetCompressedFileSizeW(string path, out uint high);
+
+    const uint INVALID_SIZE = 0xFFFFFFFF;
+    const uint FA_DIR     = 0x00000010;
+    const uint FA_REPARSE = 0x00000400;
+    static readonly IntPtr INVALID_HANDLE = new IntPtr(-1);
+
+    public Dictionary<string, long> DirSize =
+        new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+    public long FileCount;
+
+    // Prefixo \\?\ para vencer o limite de MAX_PATH (260)
+    static string Long(string p) {
+      if (p.StartsWith("\\\\")) return "\\\\?\\UNC\\" + p.Substring(2);
+      return "\\\\?\\" + p;
     }
 
-    // Aplica o Update Sequence Array (fixup) ao registro
-    static void ApplyFixup(byte[] rec, int bytesPerSector) {
-      int usaOff = U16(rec, 0x04);
-      int usaCnt = U16(rec, 0x06);
-      if (usaCnt == 0) return;
-      // primeira entrada = valor de verificacao; demais substituem os ultimos 2 bytes de cada setor
-      for (int i = 1; i < usaCnt; i++) {
-        int sectorEnd = i * bytesPerSector - 2;
-        if (sectorEnd + 1 >= rec.Length) break;
-        rec[sectorEnd]     = rec[usaOff + i * 2];
-        rec[sectorEnd + 1] = rec[usaOff + i * 2 + 1];
-      }
-    }
-
-    // Le os data runs do $DATA nao-residente do registro 0 -> extents absolutos da MFT
-    static List<long[]> ParseMftDataRuns(byte[] rec, long bytesPerCluster) {
-      List<long[]> ext = new List<long[]>();
-      int attrOff = U16(rec, 0x14);
-      int pos = attrOff;
-      while (pos + 4 <= rec.Length) {
-        uint type = U32(rec, pos);
-        if (type == 0xFFFFFFFF) break;
-        uint len = U32(rec, pos + 4);
-        if (len == 0) break;
-        if (type == 0x80 && rec[pos + 8] == 1) { // $DATA nao-residente
-          int runOff = U16(rec, pos + 0x20);
-          int rp = pos + runOff;
-          long lcn = 0;
-          while (rp < rec.Length && rec[rp] != 0) {
-            int header = rec[rp++];
-            int lenBytes = header & 0x0F;
-            int offBytes = (header >> 4) & 0x0F;
-            long runLen = 0;
-            for (int i = 0; i < lenBytes; i++) runLen |= (long)rec[rp++] << (8 * i);
-            long runOffVal = 0;
-            for (int i = 0; i < offBytes; i++) runOffVal |= (long)rec[rp++] << (8 * i);
-            if (offBytes > 0 && (rec[rp - 1] & 0x80) != 0) // sinal (relativo)
-              runOffVal |= (-1L) << (8 * offBytes);
-            lcn += runOffVal;
-            ext.Add(new long[] { lcn * bytesPerCluster, runLen * bytesPerCluster });
-          }
-          break;
-        }
-        pos += (int)len;
-      }
-      return ext;
-    }
-
-    void ParseRecord(byte[] rec, long index, int bytesPerSector) {
-      if (rec[0] != (byte)'F' || rec[1] != (byte)'I' || rec[2] != (byte)'L' || rec[3] != (byte)'E') return;
-      ApplyFixup(rec, bytesPerSector);
-      ushort flags = U16(rec, 0x16);
-      if ((flags & 0x01) == 0) return;        // registro nao em uso
-      bool isDir = (flags & 0x02) != 0;
-
-      int attrOff = U16(rec, 0x14);
-      int pos = attrOff;
-      long parent = -1;
-      string name = null;
-      int nameNs = -1;
-      long size = 0;
-      bool gotData = false;
-
-      while (pos + 4 <= rec.Length) {
-        uint type = U32(rec, pos);
-        if (type == 0xFFFFFFFF) break;
-        uint len = U32(rec, pos + 4);
-        if (len == 0 || pos + (int)len > rec.Length) break;
-        byte nonResident = rec[pos + 8];
-
-        if (type == 0x30) { // FILE_NAME (residente)
-          int vOff = U16(rec, pos + 0x14);
-          int v = pos + vOff;
-          long pref = I64(rec, v + 0x00) & 0x0000FFFFFFFFFFFF;
-          int nLen = rec[v + 0x40];
-          int ns = rec[v + 0x41];
-          // prefere Win32 (1) ou Win32&DOS (3); ignora DOS puro (2) se ja temos algo melhor
-          if (ns != 2 || name == null) {
-            if (name == null || ns != 2) {
-              parent = pref;
-              name = Encoding.Unicode.GetString(rec, v + 0x42, nLen * 2);
-              nameNs = ns;
-            }
-          }
-        } else if (type == 0x80 && rec[pos + 9] == 0 && !gotData) { // $DATA sem nome
-          if (nonResident == 0) {
-            size = U32(rec, pos + 0x10);            // residente: bytes na propria MFT
+    // Varre recursivamente um diretorio, soma o alocado fisico e cacheia por pasta. Retorna o total.
+    public long ScanDir(string dir) {
+      dir = dir.TrimEnd('\\');
+      long total = 0;
+      FIND_DATA fd;
+      IntPtr h = FindFirstFileW(Long(dir) + "\\*", out fd);
+      if (h == INVALID_HANDLE) { DirSize[dir] = 0; return 0; }
+      try {
+        do {
+          string name = fd.Name;
+          if (name == "." || name == "..") continue;
+          string full = dir + "\\" + name;
+          bool isDir     = (fd.Attr & FA_DIR) != 0;
+          bool isReparse = (fd.Attr & FA_REPARSE) != 0;
+          if (isDir) {
+            if (isReparse) { DirSize[full] = 0; continue; } // nao desce em junction/symlink
+            total += ScanDir(full);
           } else {
-            // AllocatedSize (0x28) = espaco FISICO em disco. Arquivos so-nuvem (OneDrive
-            // Files On-Demand) sao sparse e alocam ~0, entao saem da conta automaticamente.
-            size = I64(rec, pos + 0x28);
+            total += AllocOf(full, fd.SizeHigh, fd.SizeLow);
+            FileCount++;
           }
-          gotData = true;
-        }
-        pos += (int)len;
-      }
-
-      if (name == null) return;
-      MftNode n = new MftNode {
-        Index = index, Parent = parent, Name = name,
-        Size = isDir ? 0 : size, IsDir = isDir
-      };
-      Nodes[index] = n;
-      if (!isDir) FileCount++;
+        } while (FindNextFileW(h, out fd));
+      } finally { FindClose(h); }
+      DirSize[dir] = total;
+      return total;
     }
 
-    void Rollup() {
-      // RecursiveSize ja nasce 0; cada arquivo soma seu tamanho em todos os pais
-      foreach (MftNode n in Nodes.Values) {
-        long s = n.Size;
-        if (s <= 0) continue;
-        long p = n.Parent;
-        int guard = 0;
-        while (guard++ < 512) {
-          MftNode pn;
-          if (!Nodes.TryGetValue(p, out pn)) break;
-          pn.RecursiveSize += s;
-          if (p == ROOT) break;
-          if (pn.Parent == p) break;
-          p = pn.Parent;
-        }
+    long AllocOf(string path, uint logHigh, uint logLow) {
+      uint high;
+      uint low = GetCompressedFileSizeW(Long(path), out high);
+      if (low == INVALID_SIZE && Marshal.GetLastWin32Error() != 0) {
+        // Falhou (acesso negado etc): cai pro tamanho logico do FindData
+        return ((long)logHigh << 32) | logLow;
       }
-      // arquivo: display usa Size; pasta: RecursiveSize (ja calculado)
+      return ((long)high << 32) | low;
     }
 
-    void BuildKids() {
-      foreach (MftNode n in Nodes.Values) {
-        if (n.Index == ROOT) continue;
-        List<long> lst;
-        if (!Kids.TryGetValue(n.Parent, out lst)) { lst = new List<long>(); Kids[n.Parent] = lst; }
-        lst.Add(n.Index);
-      }
-      foreach (List<long> lst in Kids.Values) {
-        lst.Sort(delegate (long a, long b) {
-          long da = Nodes.ContainsKey(a) ? Nodes[a].Display : 0;
-          long db = Nodes.ContainsKey(b) ? Nodes[b].Display : 0;
-          return db.CompareTo(da);
-        });
-      }
+    public long DirAlloc(string path) {
+      long v;
+      return DirSize.TryGetValue(path.TrimEnd('\\'), out v) ? v : 0;
     }
 
-    public long[] Children(long idx) {
-      List<long> lst;
-      if (Kids.TryGetValue(idx, out lst)) return lst.ToArray();
-      return new long[0];
-    }
-
-    public MftNode Get(long idx) {
-      MftNode n; return Nodes.TryGetValue(idx, out n) ? n : null;
-    }
-
-    public long FindIndex(string path) {
-      string p = path.Trim();
-      int colon = p.IndexOf(':');
-      if (colon >= 0) p = p.Substring(colon + 1);
-      p = p.Trim('\\');
-      if (p.Length == 0) return ROOT;
-      long cur = ROOT;
-      foreach (string part in p.Split('\\')) {
-        if (part.Length == 0) continue;
-        long found = -1;
-        foreach (long c in Children(cur)) {
-          MftNode n = Get(c);
-          if (n != null && n.IsDir && string.Equals(n.Name, part, StringComparison.OrdinalIgnoreCase)) { found = c; break; }
-        }
-        if (found < 0) return -1;
-        cur = found;
-      }
-      return cur;
-    }
-
-    public string FullPath(long idx) {
-      if (idx == ROOT) return Drive + ":\\";
-      Stack<string> parts = new Stack<string>();
-      long cur = idx;
-      int guard = 0;
-      while (cur != ROOT && guard++ < 512) {
-        MftNode n = Get(cur);
-        if (n == null) break;
-        parts.Push(n.Name);
-        if (n.Parent == cur) break;
-        cur = n.Parent;
-      }
-      return Drive + ":\\" + string.Join("\\", parts.ToArray());
+    public long FileAlloc(string path) {
+      uint high;
+      uint low = GetCompressedFileSizeW(Long(path), out high);
+      if (low == INVALID_SIZE && Marshal.GetLastWin32Error() != 0) return 0;
+      return ((long)high << 32) | low;
     }
   }
 }
 '@
-try { Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop } catch { throw "Falha ao compilar o parser MFT: $($_.Exception.Message)" }
+Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop
 
 # ============================================================================
 #  Estado e helpers
 # ============================================================================
-$script:Mode    = 'WALK'   # 'MFT' ou 'WALK'
-$script:Scanner = $null
-$script:DirSize = @{}       # usado no modo WALK
-$MAX_CHILDREN   = 5000
+$script:Walker = $null
+$MAX_CHILDREN  = 5000
 
 function Format-Size([long]$bytes) {
     if ($bytes -ge 1TB) { return ('{0:N2} TB' -f ($bytes / 1TB)) }
@@ -353,84 +159,38 @@ function Format-Size([long]$bytes) {
     return "$bytes B"
 }
 
-# Retorna filhos como objetos uniformes: Name, Path, Size, IsDir, HasChildren
-function Get-Children($node) {
-    $items = New-Object System.Collections.ArrayList
-    if ($script:Mode -eq 'MFT') {
-        $idx = [long]$node.Tag
-        foreach ($cid in $script:Scanner.Children($idx)) {
-            $n = $script:Scanner.Get($cid)
-            if ($null -eq $n) { continue }
-            [void]$items.Add([pscustomobject]@{
-                Name=$n.Name; Path=$null; Size=$n.Display; IsDir=$n.IsDir;
-                HasChildren=($n.IsDir -and $script:Scanner.Children($cid).Length -gt 0); Key=$cid
-            })
-        }
-        return $items   # ja vem ordenado desc do C#
-    }
-    # WALK
-    $path = $node.Name
-    $parentSize = Get-CachedSize $path
-    $tmp = @()
-    try {
-        foreach ($d in (Get-ChildItem -LiteralPath $path -Directory -Force -ErrorAction SilentlyContinue)) {
-            $tmp += [pscustomobject]@{ Name=$d.Name; Path=$d.FullName; Size=(Get-CachedSize $d.FullName); IsDir=$true; HasChildren=$true; Key=$d.FullName }
-        }
-        foreach ($f in (Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue)) {
-            $tmp += [pscustomobject]@{ Name=$f.Name; Path=$f.FullName; Size=[long]$f.Length; IsDir=$false; HasChildren=$false; Key=$f.FullName }
-        }
-    } catch {}
-    foreach ($c in ($tmp | Sort-Object Size -Descending)) { [void]$items.Add($c) }
-    return $items
+function Test-Reparse($item) {
+    return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
-# ---- Modo WALK (fallback): scan unico recursivo, cache em $script:DirSize ----
-function Get-CachedSize([string]$path) {
-    $k = $path.TrimEnd('\')
-    if ($script:DirSize.ContainsKey($k)) { return [long]$script:DirSize[$k] }
-    return 0L
-}
-function Invoke-WalkScan([string]$root) {
-    $script:DirSize = @{}
-    $rootKey = (Resolve-Path -LiteralPath $root).Path.TrimEnd('\')
-    $count = 0
-    Get-ChildItem -LiteralPath $root -File -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        $len = $_.Length; $d = $_.DirectoryName
-        while ($d -and $d.Length -ge $rootKey.Length -and
-               $d.StartsWith($rootKey, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $script:DirSize[$d] = [long]($script:DirSize[$d]) + $len
-            if ($d.Length -le $rootKey.Length) { break }
-            $d = [System.IO.Path]::GetDirectoryName($d)
-        }
-        $count++
-        if (($count % 2000) -eq 0) {
-            $form.Text = "Show-DiskUsage [WALK] - escaneando... $count arquivos"
-            [System.Windows.Forms.Application]::DoEvents()
-        }
-    }
-    return $rootKey
-}
-
-# Popula os filhos de um node (instantaneo nos dois modos)
+# Popula os filhos de um node (uma camada). Pastas usam o cache; arquivos consultam o alocado na hora.
 function Build-Children($node) {
     $node.Nodes.Clear()
-    $children = Get-Children $node
-    $shown = 0
-    foreach ($c in $children) {
-        if ($shown -ge $MAX_CHILDREN) {
-            $more = New-Object System.Windows.Forms.TreeNode("... (+$($children.Count - $shown) itens nao exibidos)")
-            [void]$node.Nodes.Add($more); break
+    $path = $node.Name
+    $parentSize = $script:Walker.DirAlloc($path)
+    $items = @()
+    try {
+        foreach ($d in (Get-ChildItem -LiteralPath $path -Directory -Force -ErrorAction SilentlyContinue)) {
+            if (Test-Reparse $d) { continue }   # junction/symlink: nao contamos (igual a varredura)
+            $items += [pscustomobject]@{ Name=$d.Name; Path=$d.FullName; Size=($script:Walker.DirAlloc($d.FullName)); IsDir=$true }
         }
-        $pct = 0.0
-        $parentDisp = if ($script:Mode -eq 'MFT') { $script:Scanner.Get([long]$node.Tag).Display } else { Get-CachedSize $node.Name }
-        if ($parentDisp -gt 0) { $pct = 100.0 * $c.Size / $parentDisp }
+        foreach ($f in (Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue)) {
+            $items += [pscustomobject]@{ Name=$f.Name; Path=$f.FullName; Size=($script:Walker.FileAlloc($f.FullName)); IsDir=$false }
+        }
+    } catch {}
+
+    $shown = 0
+    foreach ($c in ($items | Sort-Object Size -Descending)) {
+        if ($shown -ge $MAX_CHILDREN) {
+            [void]$node.Nodes.Add((New-Object System.Windows.Forms.TreeNode("... (+$($items.Count - $shown) itens nao exibidos)")))
+            break
+        }
+        $pct = if ($parentSize -gt 0) { 100.0 * $c.Size / $parentSize } else { 0 }
         $icon = if ($c.IsDir) { '[DIR]' } else { '     ' }
         $tn = New-Object System.Windows.Forms.TreeNode
         $tn.Text = ('{0} {1}  {2}  ({3:N1}%)' -f $icon, $c.Name, (Format-Size $c.Size), $pct)
-        $tn.Tag  = $c.Key
-        # .Name guarda o caminho completo (para Explorer/Copiar/Deletar)
-        $tn.Name = if ($script:Mode -eq 'MFT') { $script:Scanner.FullPath([long]$c.Key) } else { $c.Path }
-        if ($c.HasChildren) { [void]$tn.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...'))) }
+        $tn.Name = $c.Path     # caminho completo (para Explorer/Copiar/Deletar e re-expansao)
+        if ($c.IsDir) { [void]$tn.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...'))) }
         [void]$node.Nodes.Add($tn)
         $shown++
     }
@@ -454,7 +214,7 @@ $panel.Controls.AddRange(@($txt,$btn))
 
 $status = New-Object System.Windows.Forms.StatusStrip
 $lbl = New-Object System.Windows.Forms.ToolStripStatusLabel
-$lbl.Text = 'Pronto. Digite um caminho (ex: C:\) e clique Scan.'
+$lbl.Text = 'Pronto. Digite um caminho (ex: C:\) e clique Scan. A varredura pode levar 1-3 min.'
 [void]$status.Items.Add($lbl)
 
 $tree = New-Object System.Windows.Forms.TreeView
@@ -488,8 +248,7 @@ $miDel.Add_Click({
     if ($r -eq 'Yes') {
         try {
             Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
-            $n.Remove()
-            $lbl.Text = "Deletado: $p"
+            $n.Remove(); $lbl.Text = "Deletado: $p"
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Falhou: $($_.Exception.Message)","Erro") | Out-Null
         }
@@ -509,48 +268,35 @@ $btn.Add_Click({
     }
     $tree.Nodes.Clear()
     $form.Cursor = 'WaitCursor'
+    $script:Walker = New-Object CascoDigital.DiskWalker
+    $rootKey = $root.TrimEnd('\')
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $total = 0L
+
+    # Percorre as pastas de topo uma a uma, so para dar progresso visivel no status
+    $topDirs = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)
+    foreach ($d in $topDirs) {
+        if (Test-Reparse $d) { continue }
+        $lbl.Text = "Varrendo $($d.FullName) ...  ($($script:Walker.FileCount) arquivos ate agora)"
+        [System.Windows.Forms.Application]::DoEvents()
+        $total += $script:Walker.ScanDir($d.FullName)
+    }
+    # Arquivos soltos na raiz
+    foreach ($f in (Get-ChildItem -LiteralPath $root -File -Force -ErrorAction SilentlyContinue)) {
+        $total += $script:Walker.FileAlloc($f.FullName)
+    }
+    $script:Walker.DirSize[$rootKey] = $total
+    $sw.Stop()
+
     $rootNode = New-Object System.Windows.Forms.TreeNode
-
-    # Tenta modo MFT se for raiz/caminho de um drive NTFS local
-    $drive = $null
-    if ($root -match '^[A-Za-z]:') { $drive = $root.Substring(0,1) }
-    $useMft = $false
-    if ($drive) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        try {
-            $lbl.Text = "Lendo a MFT de $drive`: ..."; [System.Windows.Forms.Application]::DoEvents()
-            $script:Scanner = [CascoDigital.MftScanner]::Scan([char]$drive)
-            $script:Mode = 'MFT'
-            $useMft = $true
-            $sw.Stop()
-            $startIdx = $script:Scanner.FindIndex($root)
-            if ($startIdx -lt 0) { $startIdx = [CascoDigital.MftScanner]::ROOT }
-            $sn = $script:Scanner.Get($startIdx)
-            $disp = if ($sn) { $sn.Display } else { 0 }
-            $rootNode.Tag  = [long]$startIdx
-            $rootNode.Name = $script:Scanner.FullPath($startIdx)
-            $rootNode.Text = ('[DIR] {0}  {1}  (100%)' -f $rootNode.Name, (Format-Size $disp))
-            $lbl.Text = "MFT: $($script:Scanner.FileCount) arquivos em $([math]::Round($sw.Elapsed.TotalSeconds,1))s  |  $($rootNode.Name) = $(Format-Size $disp)"
-        } catch {
-            $useMft = $false
-            $lbl.Text = "MFT indisponivel ($($_.Exception.Message)). Usando enumeracao classica..."
-            [System.Windows.Forms.Application]::DoEvents()
-        }
-    }
-
-    if (-not $useMft) {
-        $script:Mode = 'WALK'
-        $rootKey = Invoke-WalkScan $root
-        $rootNode.Tag  = $rootKey
-        $rootNode.Name = $rootKey
-        $rootNode.Text = ('[DIR] {0}  {1}  (100%)' -f $root, (Format-Size (Get-CachedSize $rootKey)))
-        $lbl.Text = "WALK: $root = $(Format-Size (Get-CachedSize $rootKey))"
-    }
-
+    $rootNode.Name = $rootKey
+    $rootNode.Text = ('[DIR] {0}  {1}  (100%)' -f $root, (Format-Size $total))
+    [void]$rootNode.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...')))
     [void]$tree.Nodes.Add($rootNode)
     Build-Children $rootNode
     $rootNode.Expand()
     $form.Cursor = 'Default'
+    $lbl.Text = "OK: $($script:Walker.FileCount) arquivos em $([math]::Round($sw.Elapsed.TotalSeconds,1))s  |  $root (fisico) = $(Format-Size $total)"
 })
 
 $form.Controls.Add($tree)
