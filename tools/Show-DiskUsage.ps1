@@ -24,14 +24,17 @@
     PowerShell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
 #>
 
-# ---- Auto-elevacao ----
+# ---- Requer Administrador (rode num PowerShell aberto como administrador) ----
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $pr = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe -Verb RunAs -ArgumentList @(
-        '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`""
-    )
-    exit
+    Write-Host ''
+    Write-Host '  ERRO: este script precisa de Administrador.' -ForegroundColor Red
+    Write-Host '  Abra o PowerShell como administrador (botao direito -> Executar como administrador)' -ForegroundColor Yellow
+    Write-Host '  e rode de novo:  powershell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1' -ForegroundColor Yellow
+    Write-Host ''
+    Read-Host '  Pressione Enter para sair'
+    exit 1
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -249,9 +252,7 @@ namespace CascoDigital {
     }
 
     void Rollup() {
-      foreach (MftNode n in Nodes.Values) {
-        if (n.IsDir) { n.RecursiveSize = n.RecursiveSize; } // pastas somam via filhos abaixo
-      }
+      // RecursiveSize ja nasce 0; cada arquivo soma seu tamanho em todos os pais
       foreach (MftNode n in Nodes.Values) {
         long s = n.Size;
         if (s <= 0) continue;
