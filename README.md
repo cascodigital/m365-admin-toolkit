@@ -60,7 +60,7 @@ m365-admin-toolkit/
 | `Fix-KeyboardLayout.ps1` | Forca ABNT2 e desativa hotkeys de troca de layout |
 | `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
 | `Remove-Office.ps1` | Remocao completa de instalacoes Office |
-| `Show-DiskUsage.ps1` | GUI estilo TreeSize/WizTree: tamanho de pastas/arquivos (maior no topo, % do pai), arvore navegavel e delete via botao direito. Auto-eleva para Admin. Sem instalar software de terceiros. |
+| `Show-DiskUsage.ps1` | GUI estilo TreeSize/WizTree. Le a `$MFT` crua do NTFS (scan do disco em segundos) com fallback para enumeracao classica em volumes nao-NTFS. Tamanho de pastas/arquivos (maior no topo, % do pai), arvore navegavel e delete via botao direito. Auto-eleva para Admin. Sem instalar software de terceiros. |
 
 ## GPO
 
