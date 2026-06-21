@@ -141,8 +141,16 @@ namespace CascoDigital {
   }
 }
 '@
-# Compila so uma vez por sessao (rodar de novo na mesma janela nao recompila -> sem TYPE_ALREADY_EXISTS)
-if (-not ([System.Management.Automation.PSTypeName]'CascoDigital.DiskWalker').Type) {
+# Namespace versionado pelo hash do proprio C#: cada versao do codigo vira uma classe com nome
+# unico. Assim, rodar uma versao NOVA na mesma janela nao reusa a classe antiga ja carregada, e
+# rodar a versao identica de novo nao tenta recompilar (sem TYPE_ALREADY_EXISTS).
+$verHash = ([BitConverter]::ToString(
+    [System.Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($cs))
+)).Replace('-','').Substring(0,12)
+$ns = "CascoDigital_$verHash"
+$cs = $cs.Replace('namespace CascoDigital {', "namespace $ns {")
+$script:TypeName = "$ns.DiskWalker"
+if (-not ([System.Management.Automation.PSTypeName]$script:TypeName).Type) {
     Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop
 }
 
@@ -269,7 +277,7 @@ $btn.Add_Click({
     }
     $tree.Nodes.Clear()
     $form.Cursor = 'WaitCursor'
-    $script:Walker = New-Object CascoDigital.DiskWalker
+    $script:Walker = New-Object $script:TypeName
     $rootKey = $root.TrimEnd('\')
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $total = 0L
