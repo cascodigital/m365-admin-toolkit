@@ -60,6 +60,7 @@ m365-admin-toolkit/
 | `Fix-KeyboardLayout.ps1` | Forca ABNT2 e desativa hotkeys de troca de layout |
 | `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
 | `Remove-Office.ps1` | Remocao completa de instalacoes Office |
+| `Show-DiskUsage.ps1` | GUI estilo TreeSize/WizTree: tamanho de pastas/arquivos (maior no topo, % do pai), arvore navegavel e delete via botao direito. Auto-eleva para Admin. Sem instalar software de terceiros. |
 
 ## GPO
 
@@ -95,6 +96,7 @@ Todos os scripts possuem prompts interativos e documentacao interna.
 - **`Remove-Email.ps1`** executa purge irreversivel — teste antes em ambiente controlado
 - **`Sync-SharePointDeletion.ps1`** deleta arquivos permanentemente — sempre rode em modo simulacao primeiro (`$ModoReal = $false`)
 - **`Remove-Office.ps1`** faz remocao agressiva — avise usuarios antes de executar
+- **`Show-DiskUsage.ps1`** o delete via botao direito e permanente (`Remove-Item -Recurse -Force`, sem Lixeira) — confirme o caminho antes
 
 ---
 
