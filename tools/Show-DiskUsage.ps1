@@ -233,9 +233,11 @@ namespace CascoDigital {
           }
         } else if (type == 0x80 && rec[pos + 9] == 0 && !gotData) { // $DATA sem nome
           if (nonResident == 0) {
-            size = U32(rec, pos + 0x10);            // tamanho residente
+            size = U32(rec, pos + 0x10);            // residente: bytes na propria MFT
           } else {
-            size = I64(rec, pos + 0x30);            // real size nao-residente
+            // AllocatedSize (0x28) = espaco FISICO em disco. Arquivos so-nuvem (OneDrive
+            // Files On-Demand) sao sparse e alocam ~0, entao saem da conta automaticamente.
+            size = I64(rec, pos + 0x28);
           }
           gotData = true;
         }
