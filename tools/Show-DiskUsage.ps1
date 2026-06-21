@@ -37,6 +37,9 @@ if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Blindagem: qualquer erro fatal vira MessageBox + log (senao a janela fecha sem mostrar nada)
+try {
+
 # ============================================================================
 #  Parser nativo da $MFT (NTFS) em C#. Le o volume cru e reconstroi a arvore.
 # ============================================================================
@@ -551,3 +554,17 @@ $form.Controls.Add($tree)
 $form.Controls.Add($status)
 $form.Controls.Add($panel)
 [void]$form.ShowDialog()
+
+}
+catch {
+    $msg = ($_ | Out-String) + "`n`n" + ($_.ScriptStackTrace | Out-String)
+    try { Set-Content -Path "$env:USERPROFILE\Desktop\Show-DiskUsage-error.log" -Value $msg -Encoding UTF8 } catch {}
+    try {
+        [System.Windows.Forms.MessageBox]::Show(
+            $msg.Substring(0, [Math]::Min(2000, $msg.Length)),
+            'Show-DiskUsage - ERRO FATAL', 'OK', 'Error') | Out-Null
+    } catch {
+        Write-Host $msg -ForegroundColor Red
+        Read-Host 'Pressione Enter para sair'
+    }
+}
