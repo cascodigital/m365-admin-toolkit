@@ -1,12 +1,19 @@
+<div align="center">
+
 # M365 Admin Toolkit
 
-![Status](https://img.shields.io/badge/Status-Active-brightgreen)
-![License](https://img.shields.io/badge/License-MIT-blue)
-![Author](https://img.shields.io/badge/Author-Casco%20Digital-orange)
+**PowerShell toolkit for Microsoft 365 administration, auditing, and MSP operations.**
 
+![Status](https://img.shields.io/badge/Status-Active-16A34A?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
+![Casco Digital](https://img.shields.io/badge/Casco-Digital-111827?style=flat-square)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-5391FE?style=flat-square&logo=powershell&logoColor=white)
 ![Microsoft Graph](https://img.shields.io/badge/Microsoft_Graph-SDK-00D9FF?style=flat-square&logo=microsoft&logoColor=white)
 ![Exchange Online](https://img.shields.io/badge/Exchange-Online-0078D4?style=flat-square&logo=microsoftexchange&logoColor=white)
+
+</div>
+
+---
 
 Scripts PowerShell para administracao de tenants Microsoft 365. Voltado para MSPs e admins que precisam de ferramentas prontas para auditoria, seguranca e gestao de usuarios.
 
