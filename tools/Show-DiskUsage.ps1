@@ -13,7 +13,7 @@
 
     - Maior sempre no topo, com percentual relativo ao pai
     - Mostra pastas E arquivos; arvore navegavel (expansao instantanea via cache)
-    - Menu de contexto (botao direito): Abrir no Explorer / Copiar caminho / Deletar (com confirmacao)
+    - Menu de contexto (botao direito): Abrir no Explorer / Copiar caminho
 
 .NOTES
     Requer Administrador e PowerShell 5.1+. A varredura percorre o filesystem (mais lenta que ler a
@@ -217,7 +217,7 @@ function Build-Children($node) {
         $icon = if ($c.IsDir) { '[DIR]' } else { '     ' }
         $tn = New-Object System.Windows.Forms.TreeNode
         $tn.Text = ('{0} {1}  {2}  ({3:N1}%)' -f $icon, $c.Name, (Format-Size $c.Size), $pct)
-        $tn.Name = $c.Path     # caminho completo (para Explorer/Copiar/Deletar e re-expansao)
+        $tn.Name = $c.Path     # caminho completo (para Explorer/Copiar e re-expansao)
         # Degrade pastel relativo ao maior irmao: vermelho = maior, verde = menor.
         # Canal minimo 200 mantem o fundo claro, entao o texto preto continua legivel.
         $frac = if ($maxSize -gt 0) { [double]$c.Size / $maxSize } else { 0 }
@@ -234,7 +234,7 @@ function Build-Children($node) {
 #  GUI
 # ============================================================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Show-DiskUsage (Casco Digital) - Admin'
+$form.Text = 'Show-DiskUsage - Admin'
 $form.Size = New-Object System.Drawing.Size(940,700)
 $form.StartPosition = 'CenterScreen'
 
@@ -259,7 +259,6 @@ $tree.HideSelection = $false
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $miOpen = $menu.Items.Add('Abrir no Explorer')
 $miCopy = $menu.Items.Add('Copiar caminho')
-$miDel  = $menu.Items.Add('Deletar...')
 $tree.ContextMenuStrip = $menu
 
 $tree.Add_NodeMouseClick({
@@ -274,19 +273,6 @@ $miOpen.Add_Click({
 })
 $miCopy.Add_Click({
     $n = $tree.SelectedNode; if ($n -and $n.Name) { [System.Windows.Forms.Clipboard]::SetText($n.Name) }
-})
-$miDel.Add_Click({
-    $n = $tree.SelectedNode; if (-not $n -or -not $n.Name) { return }
-    $p = $n.Name
-    $r = [System.Windows.Forms.MessageBox]::Show("Deletar PERMANENTEMENTE (sem Lixeira)?`n`n$p","Confirmar",'YesNo','Warning')
-    if ($r -eq 'Yes') {
-        try {
-            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
-            $n.Remove(); $lbl.Text = "Deletado: $p"
-        } catch {
-            [System.Windows.Forms.MessageBox]::Show("Falhou: $($_.Exception.Message)","Erro") | Out-Null
-        }
-    }
 })
 
 $tree.Add_BeforeExpand({
