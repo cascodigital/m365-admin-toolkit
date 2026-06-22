@@ -23,8 +23,6 @@
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
 
-.EXAMPLE
-    .\tools\Run-Show-DiskUsage-Admin.cmd
 #>
 
 # ---- Requer Administrador; se possivel, relanca elevado com bypass so neste processo ----
@@ -48,7 +46,7 @@ if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     }
 
     Write-Host '  Nao consegui descobrir o caminho do script atual.' -ForegroundColor Red
-    Write-Host '  Rode pelo launcher: .\tools\Run-Show-DiskUsage-Admin.cmd' -ForegroundColor Yellow
+    Write-Host '  Rode: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1' -ForegroundColor Yellow
     Write-Host ''
     Read-Host '  Pressione Enter para sair'
     exit 1
