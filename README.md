@@ -68,6 +68,7 @@ m365-admin-toolkit/
 | `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
 | `Remove-Office.ps1` | Remocao completa de instalacoes Office |
 | `Show-DiskUsage.ps1` | GUI estilo TreeSize. Pergunta ao Windows o tamanho FISICO alocado de cada arquivo (`GetCompressedFileSizeW`), batendo com a coluna "Allocated" do TreeSize: trata compressao/sparse/hardlink pelo SO, exclui arquivos so-na-nuvem (OneDrive On-Demand) e nao percorre junctions. Maior no topo, % do pai, arvore navegavel e delete via botao direito. Requer Admin. Sem instalar software de terceiros. |
+| `Run-Show-DiskUsage-Admin.cmd` | Launcher para `Show-DiskUsage.ps1`: solicita UAC e roda com `-ExecutionPolicy Bypass` apenas naquele processo, sem alterar a policy do Windows. |
 
 ## GPO
 
@@ -93,6 +94,9 @@ cd m365-admin-toolkit
 
 # Execute o script desejado
 PowerShell -ExecutionPolicy Bypass -File .\exchange\Set-CatchAllMailbox.ps1
+
+# Uso de disco: clique no .cmd ou rode
+.\tools\Run-Show-DiskUsage-Admin.cmd
 ```
 
 Todos os scripts possuem prompts interativos e documentacao interna.

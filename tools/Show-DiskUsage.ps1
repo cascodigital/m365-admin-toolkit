@@ -22,16 +22,33 @@
 
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
+
+.EXAMPLE
+    .\tools\Run-Show-DiskUsage-Admin.cmd
 #>
 
-# ---- Requer Administrador (rode num PowerShell aberto como administrador) ----
+# ---- Requer Administrador; se possivel, relanca elevado com bypass so neste processo ----
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $pr = New-Object Security.Principal.WindowsPrincipal($id)
 if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host ''
-    Write-Host '  ERRO: este script precisa de Administrador.' -ForegroundColor Red
-    Write-Host '  Abra o PowerShell como administrador (botao direito -> Executar como administrador)' -ForegroundColor Yellow
-    Write-Host '  e rode de novo:  powershell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1' -ForegroundColor Yellow
+    Write-Host '  Este script precisa de Administrador. Solicitando elevacao via UAC...' -ForegroundColor Yellow
+
+    $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    if ($scriptPath) {
+        $powershell51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Start-Process -FilePath $powershell51 -Verb RunAs -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            "`"$scriptPath`""
+        )
+        exit 0
+    }
+
+    Write-Host '  Nao consegui descobrir o caminho do script atual.' -ForegroundColor Red
+    Write-Host '  Rode pelo launcher: .\tools\Run-Show-DiskUsage-Admin.cmd' -ForegroundColor Yellow
     Write-Host ''
     Read-Host '  Pressione Enter para sair'
     exit 1
