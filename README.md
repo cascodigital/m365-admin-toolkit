@@ -66,7 +66,7 @@ m365-admin-toolkit/
 |--------|-----------|
 | `Fix-KeyboardLayout.ps1` | Forca ABNT2 e desativa hotkeys de troca de layout |
 | `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
-| `Remove-Office.ps1` | Remocao completa de instalacoes Office |
+| `Reset-OfficeTenantCache.ps1` | Limpa cache por usuario de Office/Outlook/OneDrive/WAM quando apps ficam presos em tenant antigo apos migracao. Nao remove a instalacao do Office. |
 | `Show-DiskUsage.ps1` | GUI estilo TreeSize. Pergunta ao Windows o tamanho FISICO alocado de cada arquivo (`GetCompressedFileSizeW`), batendo com a coluna "Allocated" do TreeSize: trata compressao/sparse/hardlink pelo SO, exclui arquivos so-na-nuvem (OneDrive On-Demand) e nao percorre junctions. Maior no topo, % do pai e arvore navegavel. Requer Admin. Sem instalar software de terceiros. |
 
 ## GPO
@@ -105,7 +105,6 @@ Todos os scripts possuem prompts interativos e documentacao interna.
 - **`Set-M365Passwords.ps1`** gera CSV com senhas em texto claro — armazene com seguranca
 - **`Remove-Email.ps1`** executa purge irreversivel — teste antes em ambiente controlado
 - **`Sync-SharePointDeletion.ps1`** deleta arquivos permanentemente — sempre rode em modo simulacao primeiro (`$ModoReal = $false`)
-- **`Remove-Office.ps1`** faz remocao agressiva — avise usuarios antes de executar
 
 ---
 
