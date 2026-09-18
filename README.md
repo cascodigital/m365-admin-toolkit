@@ -37,6 +37,7 @@ m365-admin-toolkit/
 | `Remove-Email.ps1` | Search & Purge de mensagens especificas no tenant |
 | `Set-MailAlias.ps1` | Gerencia aliases e habilita SendFromAliasEnabled |
 | `Get-Emails.ps1` | Lista todos os enderecos do tenant (usuarios, grupos, aliases) |
+| `Get-MessageTraceGUI.ps1` | GUI de Message Trace por remetente, destinatario, assunto, status e periodo |
 
 ## Security
 
@@ -75,7 +76,7 @@ A pasta `gpo/` contem um backup de GPO para auditoria de logons, pronto para imp
 
 ## Requisitos
 
-- PowerShell 5.1+ (recomendado 7+)
+- PowerShell 5.1+ (Get-MessageTraceGUI.ps1 requer PowerShell 7+)
 - Modulos: `Microsoft.Graph`, `ExchangeOnlineManagement`, `ImportExcel`
 - Permissoes adequadas (Global Admin / Exchange Admin / Password Admin)
 
@@ -96,9 +97,17 @@ PowerShell -ExecutionPolicy Bypass -File .\exchange\Set-CatchAllMailbox.ps1
 
 # Uso de disco
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
+
+# Message Trace (PowerShell 7+; o UPN e informado no inicio)
+pwsh -NoProfile -File .\exchange\Get-MessageTraceGUI.ps1 -AdminUPN "admin@contoso.com"
 ```
 
 Todos os scripts possuem prompts interativos e documentacao interna.
+
+O Get-MessageTraceGUI.ps1 consulta ate 89 dias, divide o periodo em janelas compativeis
+com o Exchange Online e subdivide automaticamente janelas que atingem 5.000 resultados.
+Filtros por remetente ou destinatario sao obrigatorios; uma janela que continuar saturada
+em intervalos de uma hora e marcada como incompleta.
 
 ## Avisos
 
