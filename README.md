@@ -7,7 +7,7 @@
 ![Status](https://img.shields.io/badge/Status-Active-16A34A?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
 ![Casco Digital](https://img.shields.io/badge/Casco-Digital-111827?style=flat-square)
-![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-5391FE?style=flat-square&logo=powershell&logoColor=white)
+![PowerShell](https://img.shields.io/badge/PowerShell-7+-5391FE?style=flat-square&logo=powershell&logoColor=white)
 ![Microsoft Graph](https://img.shields.io/badge/Microsoft_Graph-SDK-00D9FF?style=flat-square&logo=microsoft&logoColor=white)
 ![Exchange Online](https://img.shields.io/badge/Exchange-Online-0078D4?style=flat-square&logo=microsoftexchange&logoColor=white)
 
@@ -25,7 +25,7 @@ m365-admin-toolkit/
 ├── security/          # MFA, senhas e Security Defaults
 ├── audit/             # Logs de logon, busca de arquivos e eventos
 ├── sharepoint/        # Gestao e sincronizacao de SharePoint/OneDrive
-├── tools/             # Utilitarios (keyboard, ping, Office removal)
+├── tools/             # Utilitarios (keyboard, ping, reset de Teams/Outlook, Visio)
 └── gpo/               # GPO exportada para auditoria de logons (importavel)
 ```
 
@@ -38,6 +38,13 @@ m365-admin-toolkit/
 | `Set-MailAlias.ps1` | Gerencia aliases e habilita SendFromAliasEnabled |
 | `Get-Emails.ps1` | Lista todos os enderecos do tenant (usuarios, grupos, aliases) |
 | `Get-MessageTraceGUI.ps1` | GUI de Message Trace por remetente, destinatario, assunto, status e periodo |
+| `Invoke-MailFlowForensics.ps1` | Investiga "meu email caiu na quarentena": trace, quarentena, allow/block, junk e inbox rules, com pacote de evidencia |
+| `Audit-InboxRules.ps1` | Auditoria de inbox rules: regras ocultas, regra morta por sombreamento, corrompidas e encaminhamento externo |
+| `Remove-CorruptInboxRules.ps1` | Remove pelo nome as regras que o `Get-InboxRule` so reporta como WARNING. Mede antes/depois. Tem `-DryRun` |
+| `Manage-ArchiveAutoExpand.ps1` | Audita e (opcionalmente) habilita Auto-Expanding Archive, com checagem de holds e MRM |
+| `Get-MailboxFolderSize.ps1` | Diagnostico somente leitura de tamanho, quota, MRM e TOP N pastas por mailbox |
+| `Manage-SharedMailbox.ps1` | Menu para listar/adicionar/remover Full Access, Send As e Send on Behalf em shared mailbox |
+| `Enable-SharedSentItemsCopy.ps1` | Liga copia no Sent Items da shared para Send As/On Behalf. Simula por padrao; alvo em `-Mailbox` |
 
 ## Security
 
@@ -68,6 +75,9 @@ m365-admin-toolkit/
 | `Fix-KeyboardLayout.ps1` | Forca ABNT2 e desativa hotkeys de troca de layout |
 | `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
 | `Reset-OfficeTenantCache.ps1` | Limpa cache por usuario de Office/Outlook/OneDrive/WAM quando apps ficam presos em tenant antigo apos migracao. Nao remove a instalacao do Office. |
+| `Reset-Teams.ps1` | Remove Teams novo + classico (pacote, MSI, cache) e reinstala o novo. Simula por padrao |
+| `Reset-NewOutlook.ps1` | Remove o Novo Outlook (olk) e reinstala, devolvendo o usuario ao Outlook classico. Simula por padrao |
+| `Install-Visio.ps1` | Instala Visio via Office Deployment Tool, com validacao do setup.exe e log. Requer Admin |
 | `Show-DiskUsage.ps1` | GUI estilo TreeSize. Pergunta ao Windows o tamanho FISICO alocado de cada arquivo (`GetCompressedFileSizeW`), batendo com a coluna "Allocated" do TreeSize: trata compressao/sparse/hardlink pelo SO, exclui arquivos so-na-nuvem (OneDrive On-Demand) e nao percorre junctions. Maior no topo, % do pai e arvore navegavel. Requer Admin. Sem instalar software de terceiros. |
 
 ## GPO
@@ -76,7 +86,8 @@ A pasta `gpo/` contem um backup de GPO para auditoria de logons, pronto para imp
 
 ## Requisitos
 
-- PowerShell 5.1+ (Get-MessageTraceGUI.ps1 requer PowerShell 7+)
+- **PowerShell 7 (`pwsh`) no Windows.** Os scripts foram testados e sao recomendados em PowerShell 7.
+  Alguns ainda rodam no Windows PowerShell 5.1, mas essa versao nao e alvo de teste.
 - Modulos: `Microsoft.Graph`, `ExchangeOnlineManagement`, `ImportExcel`
 - Permissoes adequadas (Global Admin / Exchange Admin / Password Admin)
 
@@ -93,12 +104,12 @@ git clone https://github.com/cascodigital/m365-admin-toolkit.git
 cd m365-admin-toolkit
 
 # Execute o script desejado
-PowerShell -ExecutionPolicy Bypass -File .\exchange\Set-CatchAllMailbox.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\exchange\Set-CatchAllMailbox.ps1
 
 # Uso de disco
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
 
-# Message Trace (PowerShell 7+; o UPN e informado no inicio)
+# Message Trace (o UPN e informado no inicio)
 pwsh -NoProfile -File .\exchange\Get-MessageTraceGUI.ps1 -AdminUPN "admin@contoso.com"
 ```
 
@@ -110,6 +121,9 @@ Filtros por remetente ou destinatario sao obrigatorios; uma janela que continuar
 em intervalos de uma hora e marcada como incompleta.
 
 ## Avisos
+
+- Scripts que mudam estado (`Reset-*`, `Enable-SharedSentItemsCopy.ps1`) **simulam por padrao**. Para aplicar: `$global:EXECUTAR = $true; .\script.ps1`
+- Scripts de Exchange pedem o UPN do admin na execucao. Varios exigem PIM (Exchange Recipient Administrator) ativo
 
 - **`Set-M365Passwords.ps1`** gera CSV com senhas em texto claro — armazene com seguranca
 - **`Remove-Email.ps1`** executa purge irreversivel — teste antes em ambiente controlado
