@@ -71,7 +71,19 @@ Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`
 
 ## Before you run
 
-- Scripts that change state simulate by default. To apply: `$global:EXECUTAR = $true; .\script.ps1`
+> [!WARNING]
+> **Not every script previews first.** Check the safety mode below before running anything that changes the tenant or the machine.
+
+| Safety mode | Scripts |
+|---|---|
+| **Simulates by default.** Apply with `$global:EXECUTAR = $true; .\script.ps1` | Reset-Teams, Reset-NewOutlook, Enable-SharedSentItemsCopy |
+| **Simulates by default.** Apply by setting `$ModoReal = $true` in the script | Sync-SharePointDeletion |
+| **Applies by default.** Preview with a switch | Remove-CorruptInboxRules (`-DryRun`), Reset-OfficeTenantCache (`-WhatIf`) |
+| **Asks for confirmation** before changing anything | Remove-Email, Set-M365Passwords, Manage-ArchiveAutoExpand, Manage-SharedMailbox |
+| **Applies immediately, no preview** | Set-CatchAllMailbox (also removes earlier rules and groups with the same names), Set-MailAlias, Manage-SecurityDefaults-SMTP, Fix-KeyboardLayout, Install-Visio |
+| **Read-only** | Every other script |
+
+- **Bulk deletes:** `Remove-Email` purges the message from every mailbox (soft delete: only an admin can recover it, from Recoverable Items). `Sync-SharePointDeletion` deletes files in bulk; they go to the site recycle bin.
+- `Set-M365Passwords` writes passwords to a plain-text CSV.
 - Exchange scripts ask for the admin UPN at run time. Several need an active PIM role (Exchange Recipient Administrator); without it, Exchange reports existing mailboxes as not found.
-- `Remove-Email` purges permanently, `Sync-SharePointDeletion` deletes permanently, and `Set-M365Passwords` writes passwords to a plain-text CSV.
 - Script help and console output are in Portuguese.
