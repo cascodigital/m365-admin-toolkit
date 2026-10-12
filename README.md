@@ -1,134 +1,77 @@
-<div align="center">
-
 # M365 Admin Toolkit
 
-**PowerShell toolkit for Microsoft 365 administration, auditing, and MSP operations.**
+PowerShell scripts for Microsoft 365 support and administration, written for MSP work and day-to-day L1/L2 tickets. Each one exists because the portal or the native cmdlet left a gap: a limit, a blind spot or a manual step that kept coming back. MIT licensed.
 
-![Status](https://img.shields.io/badge/Status-Active-16A34A?style=flat-square)
-![License](https://img.shields.io/badge/License-MIT-2563EB?style=flat-square)
-![Casco Digital](https://img.shields.io/badge/Casco-Digital-111827?style=flat-square)
-![PowerShell](https://img.shields.io/badge/PowerShell-7+-5391FE?style=flat-square&logo=powershell&logoColor=white)
-![Microsoft Graph](https://img.shields.io/badge/Microsoft_Graph-SDK-00D9FF?style=flat-square&logo=microsoft&logoColor=white)
-![Exchange Online](https://img.shields.io/badge/Exchange-Online-0078D4?style=flat-square&logo=microsoftexchange&logoColor=white)
+Tested on and recommended for **PowerShell 7 (`pwsh`) on Windows**.
 
-</div>
+## Exchange Online
 
----
-
-Scripts PowerShell para administracao de tenants Microsoft 365. Voltado para MSPs e admins que precisam de ferramentas prontas para auditoria, seguranca e gestao de usuarios.
-
-## Estrutura
-
-```
-m365-admin-toolkit/
-├── exchange/          # Gestao de correio e aliases
-├── security/          # MFA, senhas e Security Defaults
-├── audit/             # Logs de logon, busca de arquivos e eventos
-├── sharepoint/        # Gestao e sincronizacao de SharePoint/OneDrive
-├── tools/             # Utilitarios (keyboard, ping, reset de Teams/Outlook, Visio)
-└── gpo/               # GPO exportada para auditoria de logons (importavel)
-```
-
-## Exchange
-
-| Script | Descricao |
-|--------|-----------|
-| `Set-CatchAllMailbox.ps1` | Cria grupo dinamico + regra catch-all para emails sem destino |
-| `Remove-Email.ps1` | Search & Purge de mensagens especificas no tenant |
-| `Set-MailAlias.ps1` | Gerencia aliases e habilita SendFromAliasEnabled |
-| `Get-Emails.ps1` | Lista todos os enderecos do tenant (usuarios, grupos, aliases) |
-| `Get-MessageTraceGUI.ps1` | GUI de Message Trace por remetente, destinatario, assunto, status e periodo |
-| `Invoke-MailFlowForensics.ps1` | Investiga "meu email caiu na quarentena": trace, quarentena, allow/block, junk e inbox rules, com pacote de evidencia |
-| `Audit-InboxRules.ps1` | Auditoria de inbox rules: regras ocultas, regra morta por sombreamento, corrompidas e encaminhamento externo |
-| `Remove-CorruptInboxRules.ps1` | Remove pelo nome as regras que o `Get-InboxRule` so reporta como WARNING. Mede antes/depois. Tem `-DryRun` |
-| `Manage-ArchiveAutoExpand.ps1` | Audita e (opcionalmente) habilita Auto-Expanding Archive, com checagem de holds e MRM |
-| `Get-MailboxFolderSize.ps1` | Diagnostico somente leitura de tamanho, quota, MRM e TOP N pastas por mailbox |
-| `Manage-SharedMailbox.ps1` | Menu para listar/adicionar/remover Full Access, Send As e Send on Behalf em shared mailbox |
-| `Enable-SharedSentItemsCopy.ps1` | Liga copia no Sent Items da shared para Send As/On Behalf. Simula por padrao; alvo em `-Mailbox` |
+| Script | What it does |
+|---|---|
+| [Get-MessageTraceGUI](exchange/Get-MessageTraceGUI.ps1) | Message trace GUI with hop-by-hop detail. Searches up to 89 days in real time through `Get-MessageTraceV2`, with no Historical Search queue. Splits the range into windows and subdivides any window that hits the 5,000-row cap, so nothing goes missing without a warning. |
+| [Invoke-MailFlowForensics](exchange/Invoke-MailFlowForensics.ps1) | Answers "my email went to quarantine" with an evidence package covering trace, quarantine, allow/block lists, junk settings and inbox rules. Correlates by MessageId, because quarantine indexes the header From and trace indexes the envelope sender, so searching by sender returns nothing for shared mailboxes, aliases and automations. |
+| [Audit-InboxRules](exchange/Audit-InboxRules.ps1) | Read-only inbox rule audit. Finds what the Outlook rule list hides: rules made dead by an earlier rule with the same condition and *stop processing*, hidden user rules, rules that delete NDRs and quota warnings, corrupt rules, and external forwarding checked against the tenant's accepted domains. |
+| [Remove-CorruptInboxRules](exchange/Remove-CorruptInboxRules.ps1) | Removes rules that `Get-InboxRule` reports only as a "contains errors" warning and never returns as objects. Counts the warnings before and after as proof. Supports `-DryRun`. |
+| [Get-MailboxFolderSize](exchange/Get-MailboxFolderSize.ps1) | Read-only diagnosis for a full mailbox. Shows why archiving is not freeing space (holds, MRM disabled, orphaned tags, overdue folders), estimates GB per day and projects each folder's size under a 30-day tag. |
+| [Manage-ArchiveAutoExpand](exchange/Manage-ArchiveAutoExpand.ps1) | Checks licence, archive and current state, enables auto-expanding archive only when it can help, then re-queries to prove the change. Loops over several mailboxes. |
+| [Manage-SharedMailbox](exchange/Manage-SharedMailbox.ps1) | Full Access, Send As and Send on Behalf in one menu, listing current holders before any change. |
+| [Enable-SharedSentItemsCopy](exchange/Enable-SharedSentItemsCopy.ps1) | Makes a shared mailbox keep its own copy of mail sent as or on behalf of it. Refuses non-shared targets, writes a before/after CSV, simulates by default. |
+| [Set-CatchAllMailbox](exchange/Set-CatchAllMailbox.ps1) | Catch-all for one or more domains: InternalRelay, a dynamic group of real users and a transport rule, replacing any earlier setup with the same names. |
+| [Remove-Email](exchange/Remove-Email.ps1) | Search & Purge of a specific message across all mailboxes through Compliance Search, installing missing dependencies first. |
+| [Set-MailAlias](exchange/Set-MailAlias.ps1) | Adds aliases and turns on `SendFromAliasEnabled`, without which an alias can only receive. |
+| [Get-Emails](exchange/Get-Emails.ps1) | Inventory of every address in the tenant (users, guests, groups, shared mailboxes, aliases) as a multi-sheet Excel workbook. |
 
 ## Security
 
-| Script | Descricao |
-|--------|-----------|
-| `Set-M365Passwords.ps1` | Gera e aplica senhas seguras em massa com export CSV |
-| `Manage-SecurityDefaults-SMTP.ps1` | Toggle de Security Defaults (MFA) + SMTP AUTH por usuario |
-| `Get-MfaComplianceReport.ps1` | Relatorio de conformidade MFA filtrando usuarios reais |
+| Script | What it does |
+|---|---|
+| [Get-MfaComplianceReport](security/Get-MfaComplianceReport.ps1) | MFA report that counts only real users, excluding service accounts, guests, shared mailboxes and system objects that skew the portal's numbers. Per-user drill-down and a client-ready summary. |
+| [Set-M365Passwords](security/Set-M365Passwords.ps1) | Bulk password reset by domain, with memorable passwords, throttling and a CSV of results. |
+| [Manage-SecurityDefaults-SMTP](security/Manage-SecurityDefaults-SMTP.ps1) | Turns Security Defaults off and SMTP AUTH on for a single user (printers, legacy apps), or reverts both together. |
 
 ## Audit
 
-| Script | Descricao |
-|--------|-----------|
-| `Get-LogonEvents.ps1` | Analise forense de eventos 4624 em multiplos hosts |
-| `Search-Files.ps1` | Busca arquivos em OneDrive por nome, extensao ou conteudo |
-| `Search-Events.ps1` | Analisa logs Windows por Event ID com export Excel |
+| Script | What it does |
+|---|---|
+| [Get-LogonEvents](audit/Get-LogonEvents.ps1) | Human logons only (event 4624, types 2, 7, 10 and 11) on one machine or the whole domain, tolerating offline hosts. Excel output. |
+| [Search-Events](audit/Search-Events.ps1) | Several event IDs in one pass, including archived and rotated `.evtx` files, not just the live log. Remote mode over WinRM. One Excel sheet per ID. |
+| [Search-Files](audit/Search-Files.ps1) | Finds files by name or wildcard in one user's OneDrive or across every OneDrive in a domain, through Microsoft Graph. |
 
 ## SharePoint
 
-| Script | Descricao |
-|--------|-----------|
-| `Sync-SharePointDeletion.ps1` | Deleta do SharePoint arquivos ausentes na fonte local. Util apos migracoes via SharePoint Migration Tool para manter destino em sincronia com a origem (pasta local, share de rede, OneDrive etc). Possui modo simulacao antes de executar de verdade. |
+| Script | What it does |
+|---|---|
+| [Sync-SharePointDeletion](sharepoint/Sync-SharePointDeletion.ps1) | After a SharePoint Migration Tool run, deletes from SharePoint whatever no longer exists at the source. SPMT copies but never deletes. Simulates by default. |
 
-## Tools
+## Endpoint
 
-| Script | Descricao |
-|--------|-----------|
-| `Fix-KeyboardLayout.ps1` | Forca ABNT2 e desativa hotkeys de troca de layout |
-| `Monitor-Ping.ps1` | Monitor de latencia ICMP com gravacao CSV em tempo real |
-| `Reset-OfficeTenantCache.ps1` | Limpa cache por usuario de Office/Outlook/OneDrive/WAM quando apps ficam presos em tenant antigo apos migracao. Nao remove a instalacao do Office. |
-| `Reset-Teams.ps1` | Remove Teams novo + classico (pacote, MSI, cache) e reinstala o novo. Simula por padrao |
-| `Reset-NewOutlook.ps1` | Remove o Novo Outlook (olk) e reinstala, devolvendo o usuario ao Outlook classico. Simula por padrao |
-| `Install-Visio.ps1` | Instala Visio via Office Deployment Tool, com validacao do setup.exe e log. Requer Admin |
-| `Show-DiskUsage.ps1` | GUI estilo TreeSize. Pergunta ao Windows o tamanho FISICO alocado de cada arquivo (`GetCompressedFileSizeW`), batendo com a coluna "Allocated" do TreeSize: trata compressao/sparse/hardlink pelo SO, exclui arquivos so-na-nuvem (OneDrive On-Demand) e nao percorre junctions. Maior no topo, % do pai e arvore navegavel. Requer Admin. Sem instalar software de terceiros. |
+| Script | What it does |
+|---|---|
+| [Reset-Teams](tools/Reset-Teams.ps1) | Removes every trace of Teams (new, classic, Machine-Wide Installer, Outlook add-in, caches) and reinstalls the new client. First run writes a plan, second run applies it. Custom backgrounds are saved first. |
+| [Reset-NewOutlook](tools/Reset-NewOutlook.ps1) | Same plan-then-apply removal and reinstall for the new Outlook (olk). |
+| [Reset-OfficeTenantCache](tools/Reset-OfficeTenantCache.ps1) | Clears the user's Office, OneDrive and WAM identity cache when apps keep signing in to an old tenant after a migration. Office stays installed. |
+| [Install-Visio](tools/Install-Visio.ps1) | Installs Visio matching the installed Office bitness. Fetches the Office Deployment Tool from four sources and verifies the Microsoft signature before running it. |
+| [Show-DiskUsage](tools/Show-DiskUsage.ps1) | TreeSize-style viewer with no install. Reports physical allocated size, so compression, sparse files, hard links and cloud-only OneDrive files are counted correctly. |
+| [Fix-KeyboardLayout](tools/Fix-KeyboardLayout.ps1) | Forces the ABNT2 layout on English Windows and disables the Alt+Shift and Ctrl+Shift switch hotkeys. |
+| [Monitor-Ping](tools/Monitor-Ping.ps1) | Latency and loss monitor for up to five targets, writing a CSV you can open while it runs. |
 
-## GPO
+The `gpo/` folder holds a logon-auditing GPO backup, ready for `Import-GPO`.
 
-A pasta `gpo/` contem um backup de GPO para auditoria de logons, pronto para importar via `Import-GPO` em qualquer dominio. Sem dados de cliente.
-
-## Requisitos
-
-- **PowerShell 7 (`pwsh`) no Windows.** Os scripts foram testados e sao recomendados em PowerShell 7.
-  Alguns ainda rodam no Windows PowerShell 5.1, mas essa versao nao e alvo de teste.
-- Modulos: `Microsoft.Graph`, `ExchangeOnlineManagement`, `ImportExcel`
-- Permissoes adequadas (Global Admin / Exchange Admin / Password Admin)
+## Getting started
 
 ```powershell
-Install-Module Microsoft.Graph -Scope CurrentUser
-Install-Module ExchangeOnlineManagement -Scope CurrentUser
-Install-Module ImportExcel -Scope CurrentUser
-```
+Install-Module ExchangeOnlineManagement, Microsoft.Graph, ImportExcel -Scope CurrentUser
 
-## Uso
-
-```powershell
 git clone https://github.com/cascodigital/m365-admin-toolkit.git
 cd m365-admin-toolkit
-
-# Execute o script desejado
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\exchange\Set-CatchAllMailbox.ps1
-
-# Uso de disco
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
-
-# Message Trace (o UPN e informado no inicio)
-pwsh -NoProfile -File .\exchange\Get-MessageTraceGUI.ps1 -AdminUPN "admin@contoso.com"
+pwsh -File .\exchange\Audit-InboxRules.ps1 -MailboxAddress user@contoso.com
 ```
 
-Todos os scripts possuem prompts interativos e documentacao interna.
+Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`.
 
-O Get-MessageTraceGUI.ps1 consulta ate 89 dias, divide o periodo em janelas compativeis
-com o Exchange Online e subdivide automaticamente janelas que atingem 5.000 resultados.
-Filtros por remetente ou destinatario sao obrigatorios; uma janela que continuar saturada
-em intervalos de uma hora e marcada como incompleta.
+## Before you run
 
-## Avisos
-
-- Scripts que mudam estado (`Reset-*`, `Enable-SharedSentItemsCopy.ps1`) **simulam por padrao**. Para aplicar: `$global:EXECUTAR = $true; .\script.ps1`
-- Scripts de Exchange pedem o UPN do admin na execucao. Varios exigem PIM (Exchange Recipient Administrator) ativo
-
-- **`Set-M365Passwords.ps1`** gera CSV com senhas em texto claro — armazene com seguranca
-- **`Remove-Email.ps1`** executa purge irreversivel — teste antes em ambiente controlado
-- **`Sync-SharePointDeletion.ps1`** deleta arquivos permanentemente — sempre rode em modo simulacao primeiro (`$ModoReal = $false`)
-
----
-
-Desenvolvido com 🐢 (e cafe) por **Casco Digital**.
+- Scripts that change state simulate by default. To apply: `$global:EXECUTAR = $true; .\script.ps1`
+- Exchange scripts ask for the admin UPN at run time. Several need an active PIM role (Exchange Recipient Administrator); without it, Exchange reports existing mailboxes as not found.
+- `Remove-Email` purges permanently, `Sync-SharePointDeletion` deletes permanently, and `Set-M365Passwords` writes passwords to a plain-text CSV.
+- Script help and console output are in Portuguese.
