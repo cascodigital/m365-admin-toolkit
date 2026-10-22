@@ -4,7 +4,12 @@
 .DESCRIPTION
     Connects interactively to Exchange Online, lets the operator search by sender,
     recipient, subject, status, and date range, then opens hop-by-hop details for
-    the selected message. Requires an active Exchange Online PIM role.
+    the selected message. Requires an active Exchange Online admin role
+    (activated in PIM, if you use it).
+.PARAMETER AdminUPN
+    Admin account used for Connect-ExchangeOnline.
+.EXAMPLE
+    .\Get-MessageTraceGUI.ps1 -AdminUPN ADMIN@DOMAIN.COM
 .NOTES
     PowerShell 7+ and ExchangeOnlineManagement are required.
     Searches are limited to 89 days by design and are split into API-safe windows.
@@ -53,7 +58,7 @@ try {
     Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false -ErrorAction Stop
 
     if (-not (Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue)) {
-        throw "Get-MessageTraceV2 is unavailable. Confirm the active PIM role and update ExchangeOnlineManagement."
+        throw "Get-MessageTraceV2 is unavailable. Confirm your admin role is active and update ExchangeOnlineManagement."
     }
 }
 catch {
@@ -309,11 +314,19 @@ $btn89Days.Add_Click({ Set-Last89Days })
 $btnDetails.Add_Click({ Show-TraceDetails })
 $grid.Add_CellDoubleClick({ param($sender, $eventArgs) if ($eventArgs.RowIndex -ge 0) { Show-TraceDetails } })
 
+$__root = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+$script:csvDir = Join-Path $__root 'csv'   # default export folder: csv subfolder next to the script
+if ((-not (Test-Path $script:csvDir)) -and (Test-Path (Join-Path (Split-Path $__root) 'csv'))) { $script:csvDir = Join-Path (Split-Path $__root) 'csv' }   # script in a subfolder: use the csv folder of the parent
+try { if (-not (Test-Path $script:csvDir)) { $null = New-Item -ItemType Directory -Path $script:csvDir -ErrorAction Stop } } catch {}
+try { $__p = Join-Path $script:csvDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $script:csvDir = $env:TEMP; Write-Host "WARNING: CSV output redirected to $($script:csvDir)" -Foreground Yellow }
+
 $btnExport.Add_Click({
     try {
         if ($script:TraceResults.Count -eq 0) { throw 'Run a search before exporting.' }
         $dialog = New-Object System.Windows.Forms.SaveFileDialog
         $dialog.Filter = 'CSV files (*.csv)|*.csv'
+        $dialog.InitialDirectory = $script:csvDir
         $dialog.FileName = "MessageTrace_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $script:TraceResults |

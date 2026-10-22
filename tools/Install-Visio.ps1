@@ -1,21 +1,20 @@
 <#
 .SYNOPSIS
-    Instala o Visio Professional (assinatura) via Office Deployment Tool.
+    Installs Visio Professional (subscription) via the Office Deployment Tool.
 .DESCRIPTION
-    Detecta a arquitetura do Office instalado (32/64 bits) e instala o VisioProRetail
-    no mesmo bitness, canal MonthlyEnterprise, idioma do sistema.
-    Obtem o setup.exe do ODT nesta ordem: -OdtPath, copia ja baixada, CDN do Office,
-    Download Center. Todo binario tem a assinatura Authenticode da Microsoft validada
-    antes de rodar. Log em %TEMP%\VisioODT.
+    Detects the architecture of the installed Microsoft 365 Apps (32/64-bit) and installs
+    VisioProRetail with the same bitness, MonthlyEnterprise channel, OS language.
+    Gets the ODT setup.exe in this order: -OdtPath, a previously downloaded copy, the
+    Office CDN, the Download Center. Every binary's Microsoft Authenticode signature is
+    validated before it runs. Log in %TEMP%\VisioODT.
 .PARAMETER OdtPath
-    Caminho local ou UNC de um setup.exe do ODT conhecido-bom. Tentado antes de baixar.
+    Local or UNC path to a known-good ODT setup.exe. Tried before any download.
 .EXAMPLE
     .\Install-Visio.ps1
 .EXAMPLE
     .\Install-Visio.ps1 -OdtPath '\\fileserver\it$\ODT\setup.exe'
 .NOTES
-    Requer administrador. Requer licenca de Visio atribuida ao usuario.
-    Autor: Andre Kittler da Costa
+    Requires administrator. Requires a Visio license assigned to the user.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]

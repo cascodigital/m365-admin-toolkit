@@ -1,60 +1,69 @@
 <#
 .SYNOPSIS
-    Auditoria completa de inbox rules: regras ocultas, sombreamento (regra morta),
-    corrupcao, encaminhamento externo e forwarding a nivel de mailbox.
+    Full inbox rules audit: hidden rules, shadowing (dead rule),
+    corruption, external forwarding and mailbox-level forwarding.
 
 .DESCRIPTION
-    Escrito a partir de um caso real (18/09/2026), onde o script antigo devolvia
-    "25 rules, none of them forward" -- uma frase verdadeira e inutil que escondia
-    tres problemas reais.
+    Built from a real case where a simpler script returned
+    "25 rules, none of them forward" -- a true and useless sentence that hid
+    three real problems.
 
-    O QUE ELE ACHA QUE OS OUTROS NAO ACHAVAM:
+    WHAT IT FINDS THAT SIMPLER CHECKS MISS:
 
-    [A] REGRA MORTA POR SOMBREAMENTO  <<< o achado principal
-        Duas regras com a MESMA condicao, a primeira com 'stop processing more rules'.
-        A segunda nunca executa. No caso real: prioridade 18 e 22 casavam ambas com
-        o mesmo remetente noreply de um fornecedor e mandavam para pastas DIFERENTES. A 22 era codigo
-        morto havia meses e nenhum humano viu, lendo a lista com o olho.
-        O script compara ASSINATURA DE CONDICAO, nao o texto da Description.
+    [A] DEAD RULE BY SHADOWING  <<< the main finding
+        Two rules with the SAME condition, the first one with 'stop processing more rules'.
+        The second one never runs. In the real case: two rules both matched the same
+        vendor noreply sender and sent to DIFFERENT folders. The second rule had been dead
+        code for months and no human noticed by eyeballing the list.
+        The script compares the CONDITION SIGNATURE, not the Description text.
 
-    [B] REGRA OCULTA DE USUARIO
-        Get-InboxRule sem -IncludeHidden esconde regras que RODAM. No caso real havia
-        uma regra de usuario em prioridade 1, Enabled, com stop --
-        invisivel no dialogo Rules and Alerts do Outlook. A usuaria nao conseguia ver,
-        editar nem desligar. Junk E-mail Rule e Microsoft.Exchange.OOF.* sao de sistema
-        e o script os separa como ruido.
+    [B] HIDDEN USER RULE
+        Get-InboxRule without -IncludeHidden hides rules that DO RUN. In the real case there was
+        a user rule at priority 1, Enabled, with stop --
+        invisible in Outlook's Rules and Alerts dialog. The user could not see,
+        edit or turn it off. Junk E-mail Rule and Microsoft.Exchange.OOF.* are system rules
+        and the script separates them as noise.
 
-    [C] REGRA QUE APAGA AVISO DO EXCHANGE
-        Regra que deleta mensagem vinda de MicrosoftExchange<32hex>@ mata NDR, aviso de
-        cota e notificacao de sistema. O usuario fica cego justamente para o canal que
-        explicaria o problema dele. Encontrado em producao, prioridade 2.
+    [C] RULE THAT DELETES EXCHANGE NOTICES
+        A rule that deletes messages from MicrosoftExchange<32hex>@ kills NDRs, quota
+        warnings and system notifications. The user goes blind to exactly the channel that
+        would explain their problem.
 
-    [D] REGRAS CORROMPIDAS
-        Falham no parse e sao PULADAS do output -- o cmdlet so emite WARNING. Por isso
-        InError e sempre False: as ruins nem viram objeto. Contar warning, nao linha.
+    [D] CORRUPTED RULES
+        They fail to parse and are SKIPPED from the output -- the cmdlet only emits a WARNING. That is why
+        InError is always False: the bad ones never even become objects. Count warnings, not rows.
 
-    [E] ENCAMINHAMENTO EXTERNO, as duas metades
-        Inbox rule E forwarding a nivel de mailbox, ambos avaliados contra os accepted
-        domains do tenant (Get-AcceptedDomain). O script antigo so imprimia o de mailbox sem avaliar,
-        e a lista fixa de dominios estava incompleta -- marcava dominio interno como externo.
+    [E] EXTERNAL FORWARDING, both halves
+        Inbox rule AND mailbox-level forwarding, both evaluated against the tenant's
+        accepted domains (Get-AcceptedDomain), so no hardcoded domain list can go stale.
 
-    ARMADILHA DOCUMENTADA AQUI PARA NAO SER REDESCOBERTA:
-    >> O campo Priority NAO e estavel entre a chamada com e sem -IncludeHidden. <<
-    Medido em 18/09/2026: a mesma regra aparece como Priority 3 sem hidden e 4 com;
-    outra como 6 sem e 5 com. Comparar prioridade entre as duas listagens produz
-    "buracos" fantasmas e uma hipotese inteiramente falsa (eu cai nessa).
-    A chave estavel e RuleIdentity. Toda analise de ordem aqui roda sobre UMA
-    listagem so -- a completa, com -IncludeHidden.
+    KNOWN PITFALL:
+    >> The Priority field is NOT stable between the call with and without -IncludeHidden. <<
+    The same rule can show as Priority 3 without hidden and 4 with; another as 6 without
+    and 5 with. Comparing priority across the two listings produces phantom "gaps"
+    and false conclusions.
+    The stable key is RuleIdentity. All ordering analysis here runs on ONE
+    listing only -- the full one, with -IncludeHidden.
+
+.PARAMETER MailboxAddress
+    The mailbox to audit (UPN or primary SMTP address).
+
+.PARAMETER AdminUPN
+    Admin account used to connect to Exchange Online if no session is active.
+
+.PARAMETER OutFolder
+    Folder for the CSV output. Default: 'csv' subfolder next to the script
+    (falls back to $env:TEMP if not writable).
 
 .NOTES
-    AUDITORIA -- R1: zero cmdlet de escrita no tenant. Sem gate $Execute porque nao ha
-    nada para gatear. Pode colar no console sem medo.
+    READ-ONLY: zero write cmdlets against the tenant.
 
-    PRE-REQ: PIM "Exchange Recipient Administrator" ativo ANTES de conectar. Sem ele,
-    Get-Mailbox mente dizendo "object couldn't be found" -- 404 falso, e permissao.
+    PREREQ: an Exchange admin role (e.g. "Exchange Recipient Administrator", activated in PIM
+    if you use it) BEFORE connecting. Without it, Get-Mailbox reports
+    "object couldn't be found" -- a false 404, it is permissions.
 
 .EXAMPLE
-    .\Audit-InboxRules.ps1 -MailboxAddress "user@contoso.com"
+    .\Audit-InboxRules.ps1 -MailboxAddress "user@domain.com" -AdminUPN "ADMIN@DOMAIN.COM"
 #>
 
 param(
@@ -68,67 +77,70 @@ param(
     [string]$OutFolder
 )
 
-# Dominios internos: preenchidos com Get-AcceptedDomain logo apos conectar (sem lista fixa).
+# Internal domains: filled from Get-AcceptedDomain right after connecting (no hardcoded list).
 $TrustedDomains = @()
 
-# regras de sistema que sao ocultas em TODA caixa -- ruido, nao achado
+# system rules that are hidden in EVERY mailbox -- noise, not a finding
 $SystemHiddenPattern = '^Junk E-mail Rule$|^Microsoft\.Exchange\.OOF\.'
 
-# caixa de sistema do Exchange (NDR, cota, notificacoes)
+# Exchange system mailbox (NDR, quota, notifications)
 $SystemMailboxPattern = 'MicrosoftExchange[0-9a-f]{32}@'
 
 # ---------------------------------------------------------------------------
-# 0. Pasta de saida -- PROVA de escrita, nao Test-Path.
-#    Fallback e TEMP, nao Desktop: Desktop pode estar redirecionado por OneDrive
-#    KFM, e CSV com PII nao deve sincronizar.
+# 0. Output folder -- PROOF of write access, not Test-Path.
+#    Fallback is TEMP, not Desktop: Desktop may be redirected by OneDrive
+#    KFM, and a CSV with PII should not sync.
 # ---------------------------------------------------------------------------
-$saida = if ($OutFolder) { $OutFolder } elseif ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
-try { $__p = Join-Path $saida "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
-catch { $saida = $env:TEMP; Write-Host "AVISO: saida redirecionada para $saida" -ForegroundColor Yellow }
+$__root = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+$csvDir = if ($OutFolder) { $OutFolder } else { Join-Path $__root 'csv' }   # CSV always in the csv subfolder next to the script, even if the script is moved (-OutFolder still wins)
+if (-not $OutFolder -and (-not (Test-Path $csvDir)) -and (Test-Path (Join-Path (Split-Path $__root) 'csv'))) { $csvDir = Join-Path (Split-Path $__root) 'csv' }   # script in a subfolder: use the csv folder of the parent
+try { if (-not (Test-Path $csvDir)) { $null = New-Item -ItemType Directory -Path $csvDir -ErrorAction Stop } } catch {}
+try { $__p = Join-Path $csvDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $csvDir = $env:TEMP; Write-Host "WARNING: CSV output redirected to $csvDir" -ForegroundColor Yellow }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $slug  = ($MailboxAddress.Split('@')[0]) -replace '[^\w\.\-]','_'
 
 # ---------------------------------------------------------------------------
-# 1. Conexao
+# 1. Connection
 # ---------------------------------------------------------------------------
 try {
     if (-not (Get-ConnectionInformation -ErrorAction SilentlyContinue)) {
-        Write-Host "Conectando ao EXO como $AdminUPN ..." -ForegroundColor Cyan
+        Write-Host "Connecting to EXO as $AdminUPN ..." -ForegroundColor Cyan
         Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
-    } else { Write-Host "Sessao EXO ja ativa." -ForegroundColor Green }
+    } else { Write-Host "EXO session already active." -ForegroundColor Green }
     $TrustedDomains = @(Get-AcceptedDomain | ForEach-Object { [string]$_.DomainName })
-    Write-Host "Dominios internos: $($TrustedDomains -join ', ')" -ForegroundColor DarkGray
+    Write-Host "Internal domains: $($TrustedDomains -join ', ')" -ForegroundColor DarkGray
 }
 catch {
-    Write-Host "FALHA na conexao: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "'Error Acquiring Token' + RuntimeBroker = WAM broker quebrado no CLIENTE," -ForegroundColor Yellow
-    Write-Host "nao e PIM nem role -- o crash acontece antes de existir sessao." -ForegroundColor Yellow
+    Write-Host "CONNECTION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "'Error Acquiring Token' + RuntimeBroker = WAM broker broken on the CLIENT," -ForegroundColor Yellow
+    Write-Host "not PIM or a role -- the crash happens before any session exists." -ForegroundColor Yellow
     return
 }
 
 try { $mailbox = Get-Mailbox -Identity $MailboxAddress -ErrorAction Stop }
 catch {
-    Write-Host "Mailbox nao encontrada: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "ATENCAO: 'couldn't be found' quase sempre e PIM inativo disfarcado de 404." -ForegroundColor Yellow
+    Write-Host "Mailbox not found: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "ATTENTION: 'couldn't be found' is almost always inactive PIM disguised as a 404." -ForegroundColor Yellow
     return
 }
 
 Write-Host "`nMailbox: $($mailbox.DisplayName) <$($mailbox.PrimarySmtpAddress)>" -ForegroundColor Green
-Write-Host "Tipo: $($mailbox.RecipientTypeDetails) | Saida: $saida" -ForegroundColor DarkGray
+Write-Host "Type: $($mailbox.RecipientTypeDetails) | Output: $csvDir" -ForegroundColor DarkGray
 
 $findings = [System.Collections.Generic.List[object]]::new()
 function Add-Finding {
-    param($Severidade,$Origem,$Item,$Detalhe,$Acao)
+    param($Severity,$Source,$Item,$Detail,$Action)
     $findings.Add([PSCustomObject]@{
-        Mailbox=$MailboxAddress; Severidade=$Severidade; Origem=$Origem
-        Item=$Item; Detalhe=$Detalhe; Acao=$Acao
+        Mailbox=$MailboxAddress; Severity=$Severity; Source=$Source
+        Item=$Item; Detail=$Detail; Action=$Action
     })
 }
 
 # ---------------------------------------------------------------------------
-# 2. Assinaturas -- comparar CONDICAO, nao a prosa da Description
-#    (Description e texto localizado e muda de forma sem a regra mudar)
+# 2. Signatures -- compare the CONDITION, not the Description prose
+#    (Description is localized text and changes shape without the rule changing)
 # ---------------------------------------------------------------------------
 $CondProps = @(
     'From','SentTo','FromAddressContainsWords','RecipientAddressContainsWords'
@@ -151,7 +163,7 @@ function Get-Signature {
     $parts = foreach ($p in $Props) {
         $pr = $Rule.PSObject.Properties[$p]
         if (-not $pr -or $null -eq $pr.Value) { continue }
-        if ($pr.Value -is [bool] -and -not $pr.Value) { continue }   # $false nao e condicao
+        if ($pr.Value -is [bool] -and -not $pr.Value) { continue }   # $false is not a condition
         $vals = @($pr.Value | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) | Sort-Object
         if ($vals.Count -eq 0) { continue }
         "$p=$($vals -join '|')"
@@ -160,48 +172,48 @@ function Get-Signature {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Leitura -- as duas listagens. Warnings capturados (regra corrompida).
-#    Sem -ResultSize: o sentinel Unlimited e rejeitado por algumas sessoes EXO.
+# 3. Read -- both listings. Warnings captured (corrupted rule).
+#    No -ResultSize: the Unlimited sentinel is rejected by some EXO sessions.
 # ---------------------------------------------------------------------------
 $wVis = @()
-try { $visiveis = @(Get-InboxRule -Mailbox $MailboxAddress -WarningVariable wVis -WarningAction SilentlyContinue -ErrorAction Stop) }
-catch { Write-Host "Falha ao ler inbox rules: $($_.Exception.Message)" -ForegroundColor Red; return }
+try { $visible = @(Get-InboxRule -Mailbox $MailboxAddress -WarningVariable wVis -WarningAction SilentlyContinue -ErrorAction Stop) }
+catch { Write-Host "Failed to read inbox rules: $($_.Exception.Message)" -ForegroundColor Red; return }
 
-$temHidden = (Get-Command Get-InboxRule).Parameters.Keys -contains 'IncludeHidden'
+$hasHidden = (Get-Command Get-InboxRule).Parameters.Keys -contains 'IncludeHidden'
 $wAll = @()
-if ($temHidden) {
-    try { $todas = @(Get-InboxRule -Mailbox $MailboxAddress -IncludeHidden -WarningVariable wAll -WarningAction SilentlyContinue -ErrorAction Stop) }
-    catch { $todas = $visiveis; $temHidden = $false }
-} else { $todas = $visiveis }
+if ($hasHidden) {
+    try { $allRules = @(Get-InboxRule -Mailbox $MailboxAddress -IncludeHidden -WarningVariable wAll -WarningAction SilentlyContinue -ErrorAction Stop) }
+    catch { $allRules = $visible; $hasHidden = $false }
+} else { $allRules = $visible }
 
-$corruptas = [Math]::Max(@($wVis).Count, @($wAll).Count)
+$corruptCount = [Math]::Max(@($wVis).Count, @($wAll).Count)
 
-# chave estavel: RuleIdentity. NUNCA Priority (instavel entre as listagens).
-$idsVis  = @($visiveis | ForEach-Object { "$($_.RuleIdentity)" })
-$ocultas = @($todas | Where-Object { "$($_.RuleIdentity)" -notin $idsVis })
+# stable key: RuleIdentity. NEVER Priority (unstable between listings).
+$visibleIds  = @($visible | ForEach-Object { "$($_.RuleIdentity)" })
+$hiddenRules = @($allRules | Where-Object { "$($_.RuleIdentity)" -notin $visibleIds })
 
-Write-Host "`n=== INVENTARIO ===" -ForegroundColor Yellow
-Write-Host ("Visiveis no Outlook ..: {0}" -f $visiveis.Count)
-Write-Host ("Total com ocultas ....: {0}{1}" -f $todas.Count, $(if(-not $temHidden){' (sessao nao expoe -IncludeHidden)'}else{''}))
-Write-Host ("Ocultas ..............: {0}" -f $ocultas.Count)
-Write-Host ("Corrompidas ..........: {0}" -f $corruptas) -ForegroundColor $(if($corruptas -gt 0){'Red'}else{'Green'})
+Write-Host "`n=== INVENTORY ===" -ForegroundColor Yellow
+Write-Host ("Visible in Outlook ...: {0}" -f $visible.Count)
+Write-Host ("Total incl. hidden ...: {0}{1}" -f $allRules.Count, $(if(-not $hasHidden){' (session does not expose -IncludeHidden)'}else{''}))
+Write-Host ("Hidden ...............: {0}" -f $hiddenRules.Count)
+Write-Host ("Corrupted ............: {0}" -f $corruptCount) -ForegroundColor $(if($corruptCount -gt 0){'Red'}else{'Green'})
 
 foreach ($w in @($wAll)) {
-    Add-Finding 'CORROMPIDA' 'InboxRule' "$w" 'Pulada pelo parser -- conteudo e destino desconhecidos.' `
-        'Rodar Remove-CorruptInboxRules.ps1 -DryRun primeiro.'
+    Add-Finding 'CORRUPT' 'InboxRule' "$w" 'Skipped by the parser -- content and destination unknown.' `
+        'Run Remove-CorruptInboxRules.ps1 -DryRun first.'
 }
 
 # ---------------------------------------------------------------------------
-# 4. Tabela de trabalho
+# 4. Working table
 # ---------------------------------------------------------------------------
-$map = foreach ($rule in $todas) {
-    $rid    = "$($rule.RuleIdentity)"
-    $oculta = $rid -notin $idsVis
+$map = foreach ($rule in $allRules) {
+    $rid      = "$($rule.RuleIdentity)"
+    $isHidden = $rid -notin $visibleIds
     [PSCustomObject]@{
-        Ordem        = [int]$rule.Priority
-        Nome         = "$($rule.Name)"
-        Oculta       = $oculta
-        Sistema      = ($oculta -and "$($rule.Name)" -match $SystemHiddenPattern)
+        Order        = [int]$rule.Priority
+        RuleName     = "$($rule.Name)"
+        Hidden       = $isHidden
+        System       = ($isHidden -and "$($rule.Name)" -match $SystemHiddenPattern)
         Enabled      = $rule.Enabled
         Stop         = [bool]$rule.StopProcessingRules
         CondSig      = Get-Signature $rule $CondProps
@@ -218,186 +230,186 @@ $map = foreach ($rule in $todas) {
 }
 
 # ---------------------------------------------------------------------------
-# 5. [A] SOMBREAMENTO -- a regra morta
+# 5. [A] SHADOWING -- the dead rule
 # ---------------------------------------------------------------------------
-Write-Host "`n=== SOMBREAMENTO (regra que nunca executa) ===" -ForegroundColor Yellow
-$mortas = 0
+Write-Host "`n=== SHADOWING (rule that never runs) ===" -ForegroundColor Yellow
+$deadCount = 0
 foreach ($g in ($map | Where-Object { $_.CondSig } | Group-Object CondSig | Where-Object Count -gt 1)) {
-    $ord = @($g.Group | Sort-Object Ordem)
+    $ord = @($g.Group | Sort-Object Order)
     for ($i = 0; $i -lt $ord.Count - 1; $i++) {
         if (-not $ord[$i].Stop) { continue }
-        $bloq = $ord[$i]
+        $blocker = $ord[$i]
         for ($j = $i + 1; $j -lt $ord.Count; $j++) {
-            $morta = $ord[$j]
-            $mesmaAcao = ($morta.ActSig -eq $bloq.ActSig)
-            $sev  = if ($mesmaAcao) { 'REDUNDANTE' } else { 'REGRA MORTA' }
-            $acao = if ($mesmaAcao) {
-                "Duplicata inofensiva. Apagar '$($morta.Nome)' para limpar a lista."
+            $dead = $ord[$j]
+            $sameAction = ($dead.ActSig -eq $blocker.ActSig)
+            $sev  = if ($sameAction) { 'REDUNDANT' } else { 'DEAD RULE' }
+            $action = if ($sameAction) {
+                "Harmless duplicate. Delete '$($dead.RuleName)' to clean up the list."
             } else {
-                "CONFIRMAR com o usuario qual pasta e a correta, e apagar a regra perdedora."
+                "CONFIRM with the user which folder is correct, and delete the losing rule."
             }
-            Add-Finding $sev 'InboxRule' "$($morta.Nome)  [ordem $($morta.Ordem)]" `
-                "Condicao identica a '$($bloq.Nome)' (ordem $($bloq.Ordem)), que tem STOP. Destino desta: '$($morta.MoveToFolder)' | destino da que ganha: '$($bloq.MoveToFolder)'." $acao
-            if (-not $mesmaAcao) {
-                $mortas++
-                Write-Host "  [MORTA] '$($morta.Nome)' nunca roda -- bloqueada por '$($bloq.Nome)'" -ForegroundColor Red
-                Write-Host "          esperado em '$($morta.MoveToFolder)', vai para '$($bloq.MoveToFolder)'" -ForegroundColor Red
+            Add-Finding $sev 'InboxRule' "$($dead.RuleName)  [order $($dead.Order)]" `
+                "Condition identical to '$($blocker.RuleName)' (order $($blocker.Order)), which has STOP. This rule's destination: '$($dead.MoveToFolder)' | winning rule's destination: '$($blocker.MoveToFolder)'." $action
+            if (-not $sameAction) {
+                $deadCount++
+                Write-Host "  [DEAD]  '$($dead.RuleName)' never runs -- blocked by '$($blocker.RuleName)'" -ForegroundColor Red
+                Write-Host "          expected in '$($dead.MoveToFolder)', goes to '$($blocker.MoveToFolder)'" -ForegroundColor Red
             } else {
-                Write-Host "  [dup]   '$($morta.Nome)' e redundante com '$($bloq.Nome)' (mesmo destino)" -ForegroundColor DarkYellow
+                Write-Host "  [dup]   '$($dead.RuleName)' is redundant with '$($blocker.RuleName)' (same destination)" -ForegroundColor DarkYellow
             }
         }
         break
     }
 }
-if ($mortas -eq 0) { Write-Host "Nenhuma regra morta por condicao identica." -ForegroundColor DarkGray }
-Write-Host "Obs: so deteta condicao IDENTICA. Regra mais ampla engolindo uma mais estreita" -ForegroundColor DarkGray
-Write-Host "     exige olho humano -- ver o mapa de execucao no fim." -ForegroundColor DarkGray
+if ($deadCount -eq 0) { Write-Host "No dead rule by identical condition." -ForegroundColor DarkGray }
+Write-Host "Note: only detects IDENTICAL conditions. A broader rule swallowing a narrower one" -ForegroundColor DarkGray
+Write-Host "      needs a human eye -- see the execution map at the end." -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------------------
-# 6. [B] REGRAS OCULTAS DE USUARIO
+# 6. [B] HIDDEN USER RULES
 # ---------------------------------------------------------------------------
-Write-Host "`n=== REGRAS OCULTAS ===" -ForegroundColor Yellow
-$ocultasUser = @($map | Where-Object { $_.Oculta -and -not $_.Sistema })
-$ocultasSys  = @($map | Where-Object { $_.Oculta -and $_.Sistema })
-if ($ocultasSys.Count -gt 0) {
-    Write-Host "De sistema (normal, ignorar): $(($ocultasSys.Nome) -join ', ')" -ForegroundColor DarkGray
+Write-Host "`n=== HIDDEN RULES ===" -ForegroundColor Yellow
+$hiddenUser = @($map | Where-Object { $_.Hidden -and -not $_.System })
+$hiddenSys  = @($map | Where-Object { $_.Hidden -and $_.System })
+if ($hiddenSys.Count -gt 0) {
+    Write-Host "System (normal, ignore): $(($hiddenSys.RuleName) -join ', ')" -ForegroundColor DarkGray
 }
-if ($ocultasUser.Count -eq 0) {
-    Write-Host "Nenhuma regra oculta de usuario." -ForegroundColor Green
+if ($hiddenUser.Count -eq 0) {
+    Write-Host "No hidden user rules." -ForegroundColor Green
 } else {
-    foreach ($o in $ocultasUser) {
-        $sev = if ($o.Enabled) { 'OCULTA ATIVA' } else { 'OCULTA INATIVA' }
-        Write-Host "  [$sev] '$($o.Nome)' (ordem $($o.Ordem), stop=$($o.Stop))" -ForegroundColor Red
+    foreach ($o in $hiddenUser) {
+        $sev = if ($o.Enabled) { 'HIDDEN ACTIVE' } else { 'HIDDEN INACTIVE' }
+        Write-Host "  [$sev] '$($o.RuleName)' (order $($o.Order), stop=$($o.Stop))" -ForegroundColor Red
         Write-Host "         $($o.Description)" -ForegroundColor DarkGray
-        Add-Finding $sev 'InboxRule' "$($o.Nome)  [ordem $($o.Ordem)]" `
-            "Nao aparece em Rules and Alerts do Outlook. Enabled=$($o.Enabled), Stop=$($o.Stop). $($o.Description)" `
-            'Mostrar ao usuario e perguntar se o comportamento e o esperado. So sai por Remove-InboxRule (APPLY- com gate).'
+        Add-Finding $sev 'InboxRule' "$($o.RuleName)  [order $($o.Order)]" `
+            "Does not appear in Outlook's Rules and Alerts. Enabled=$($o.Enabled), Stop=$($o.Stop). $($o.Description)" `
+            'Show the user and ask whether the behavior is expected. Can only be removed with Remove-InboxRule.'
     }
 }
 
 # ---------------------------------------------------------------------------
-# 7. [C] REGRA QUE APAGA AVISO DO EXCHANGE
+# 7. [C] RULE THAT DELETES EXCHANGE NOTICES
 # ---------------------------------------------------------------------------
 foreach ($m in $map) {
-    if ($m.CondSig -match $SystemMailboxPattern -and ($m.DeleteMessage -or $m.MoveToFolder -match 'Deleted|Lixeira')) {
-        Add-Finding 'CEGUEIRA' 'InboxRule' "$($m.Nome)  [ordem $($m.Ordem)]" `
-            'Descarta mensagem da caixa de sistema do Exchange: NDR, aviso de cota e notificacao de falha.' `
-            'Informar o usuario -- ele nao vera nenhum aviso do Exchange enquanto esta regra existir.'
+    if ($m.CondSig -match $SystemMailboxPattern -and ($m.DeleteMessage -or $m.MoveToFolder -match 'Deleted|Lixeira')) {   # 'Lixeira' = Portuguese-localized Deleted Items
+        Add-Finding 'BLINDSPOT' 'InboxRule' "$($m.RuleName)  [order $($m.Order)]" `
+            'Discards messages from the Exchange system mailbox: NDRs, quota warnings and failure notifications.' `
+            'Inform the user -- they will not see any Exchange notice while this rule exists.'
     }
 }
 
 # ---------------------------------------------------------------------------
-# 8. [E] ENCAMINHAMENTO -- mailbox E regras, avaliados de verdade
+# 8. [E] FORWARDING -- mailbox AND rules, actually evaluated
 # ---------------------------------------------------------------------------
-Write-Host "`n=== ENCAMINHAMENTO ===" -ForegroundColor Yellow
+Write-Host "`n=== FORWARDING ===" -ForegroundColor Yellow
 function Test-Targets {
-    param([string]$Origem,[string]$Item,[string]$Raw)
+    param([string]$Source,[string]$Item,[string]$Raw)
     if ([string]::IsNullOrWhiteSpace($Raw)) { return }
     $addrs = @([regex]::Matches($Raw,'[\w\.\-\+]+@[\w\.\-]+\.\w+') | ForEach-Object { $_.Value } | Select-Object -Unique)
     foreach ($a in $addrs) {
         if ($TrustedDomains -notcontains $a.Split('@')[1]) {
-            Add-Finding 'EXTERNO' $Origem $Item "Destino fora dos dominios do tenant: $a" `
-                'Causa provavel do bloqueio anti-autoforward. Alternativa: shared mailbox ou grupo interno.'
-            Write-Host "  [EXTERNO] $Item -> $a" -ForegroundColor Red
+            Add-Finding 'EXTERNAL' $Source $Item "Destination outside the internal domains: $a" `
+                'Likely cause of the anti-autoforward block. Alternative: shared mailbox or internal group.'
+            Write-Host "  [EXTERNAL] $Item -> $a" -ForegroundColor Red
         }
     }
-    # alvo que nao resolve para SMTP (objeto de diretorio) nao pode ser dado como seguro
+    # a target that does not resolve to SMTP (directory object) cannot be assumed safe
     if ($addrs.Count -eq 0 -or $Raw -match '\[EX:') {
-        Add-Finding 'REVISAR' $Origem $Item "Alvo nao resolveu para SMTP: $Raw" 'Conferir manualmente para quem aponta.'
+        Add-Finding 'REVIEW' $Source $Item "Target did not resolve to SMTP: $Raw" 'Check manually where it points.'
     }
 }
 
 $mbxFwdAddr = "$($mailbox.ForwardingAddress)"
 $mbxFwdSmtp = "$($mailbox.ForwardingSmtpAddress)"
 if ($mbxFwdAddr -or $mbxFwdSmtp) {
-    Write-Host "Forwarding a nivel de mailbox ATIVO:" -ForegroundColor Red
+    Write-Host "Mailbox-level forwarding ACTIVE:" -ForegroundColor Red
     Write-Host "  ForwardingAddress .....: $mbxFwdAddr"
     Write-Host "  ForwardingSmtpAddress .: $mbxFwdSmtp"
     Write-Host "  DeliverToMailboxAndForward: $($mailbox.DeliverToMailboxAndForward)"
     Test-Targets 'Mailbox' 'ForwardingAddress'     $mbxFwdAddr
     Test-Targets 'Mailbox' 'ForwardingSmtpAddress' $mbxFwdSmtp
     if (-not $mailbox.DeliverToMailboxAndForward) {
-        Add-Finding 'REVISAR' 'Mailbox' 'DeliverToMailboxAndForward=False' `
-            'Encaminha SEM deixar copia local -- o usuario nao ve a mensagem na propria caixa.' 'Confirmar se e intencional.'
+        Add-Finding 'REVIEW' 'Mailbox' 'DeliverToMailboxAndForward=False' `
+            'Forwards WITHOUT keeping a local copy -- the user does not see the message in their own mailbox.' 'Confirm whether this is intentional.'
     }
-} else { Write-Host "Sem forwarding a nivel de mailbox." -ForegroundColor DarkGray }
+} else { Write-Host "No mailbox-level forwarding." -ForegroundColor DarkGray }
 
-$comFwd = @($map | Where-Object { $_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo -or $_.TextNotifyTo })
-if ($comFwd.Count -eq 0) { Write-Host "Nenhuma regra encaminha ou redireciona." -ForegroundColor DarkGray }
-foreach ($f in $comFwd) {
-    Test-Targets 'InboxRule' "$($f.Nome) :: ForwardTo"       $f.ForwardTo
-    Test-Targets 'InboxRule' "$($f.Nome) :: ForwardAsAttach" $f.ForwardAsAttachmentTo
-    Test-Targets 'InboxRule' "$($f.Nome) :: RedirectTo"      $f.RedirectTo
-    Test-Targets 'InboxRule' "$($f.Nome) :: TextNotifyTo"    $f.TextNotifyTo
+$withFwd = @($map | Where-Object { $_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo -or $_.TextNotifyTo })
+if ($withFwd.Count -eq 0) { Write-Host "No rule forwards or redirects." -ForegroundColor DarkGray }
+foreach ($f in $withFwd) {
+    Test-Targets 'InboxRule' "$($f.RuleName) :: ForwardTo"       $f.ForwardTo
+    Test-Targets 'InboxRule' "$($f.RuleName) :: ForwardAsAttach" $f.ForwardAsAttachmentTo
+    Test-Targets 'InboxRule' "$($f.RuleName) :: RedirectTo"      $f.RedirectTo
+    Test-Targets 'InboxRule' "$($f.RuleName) :: TextNotifyTo"    $f.TextNotifyTo
 }
 
-# nomes duplicados -- carimbo do Outlook quando duplica regra
-foreach ($d in ($map | Group-Object Nome | Where-Object Count -gt 1)) {
-    Add-Finding 'DUPLICADA' 'InboxRule' "$($d.Name)" "$($d.Count) regras com o nome identico." 'Conferir qual manter.'
+# duplicate names -- Outlook's stamp when a rule is duplicated
+foreach ($d in ($map | Group-Object RuleName | Where-Object Count -gt 1)) {
+    Add-Finding 'DUPLICATE' 'InboxRule' "$($d.Name)" "$($d.Count) rules with the identical name." 'Check which one to keep.'
 }
-foreach ($s in ($map | Where-Object { $_.Nome -match '\(\d+\)\s*$' })) {
-    Add-Finding 'DUPLICADA' 'InboxRule' "$($s.Nome)" 'Sufixo "(N)" e o carimbo do Outlook ao duplicar regra.' 'Conferir se a original ainda existe.'
+foreach ($s in ($map | Where-Object { $_.RuleName -match '\(\d+\)\s*$' })) {
+    Add-Finding 'DUPLICATE' 'InboxRule' "$($s.RuleName)" 'The "(N)" suffix is Outlook''s stamp when duplicating a rule.' 'Check whether the original still exists.'
 }
 
 # ---------------------------------------------------------------------------
-# 9. Exportacao -- SEMPRE, inclusive no negativo (o ticket precisa da prova)
+# 9. Export -- ALWAYS, even when negative (keeps evidence of a clean result)
 # ---------------------------------------------------------------------------
-$csvMapa    = Join-Path $saida "rules-mapa-$slug-$stamp.csv"
-$csvAchados = Join-Path $saida "rules-achados-$slug-$stamp.csv"
-$map | Sort-Object Ordem | Export-Csv -Path $csvMapa -NoTypeInformation -Encoding UTF8
-if ($findings.Count -gt 0) { $findings | Export-Csv -Path $csvAchados -NoTypeInformation -Encoding UTF8 }
+$csvMap      = Join-Path $csvDir "rules-map-$slug-$stamp.csv"
+$csvFindings = Join-Path $csvDir "rules-findings-$slug-$stamp.csv"
+$map | Sort-Object Order | Export-Csv -Path $csvMap -NoTypeInformation -Encoding UTF8
+if ($findings.Count -gt 0) { $findings | Export-Csv -Path $csvFindings -NoTypeInformation -Encoding UTF8 }
 else {
-    [PSCustomObject]@{ Mailbox=$MailboxAddress; Severidade='NADA ENCONTRADO'; Origem='-'; Item='-'
-        Detalhe="$($todas.Count) regras, 0 corrompidas, 0 ocultas de usuario, 0 mortas, 0 destino externo."; Acao='-'
-    } | Export-Csv -Path $csvAchados -NoTypeInformation -Encoding UTF8
+    [PSCustomObject]@{ Mailbox=$MailboxAddress; Severity='NOTHING FOUND'; Source='-'; Item='-'
+        Detail="$($allRules.Count) rules, 0 corrupted, 0 hidden user rules, 0 dead, 0 external destinations."; Action='-'
+    } | Export-Csv -Path $csvFindings -NoTypeInformation -Encoding UTF8
 }
 
-# ============ RESUMO -- ULTIMO BLOCO, NADA DEPOIS ============
+# ============ SUMMARY -- LAST BLOCK, NOTHING AFTER ============
 $c = @{}
-foreach ($k in 'CORROMPIDA','REGRA MORTA','OCULTA ATIVA','EXTERNO','CEGUEIRA','REDUNDANTE','DUPLICADA','REVISAR') {
-    $c[$k] = @($findings | Where-Object Severidade -eq $k).Count
+foreach ($k in 'CORRUPT','DEAD RULE','HIDDEN ACTIVE','EXTERNAL','BLINDSPOT','REDUNDANT','DUPLICATE','REVIEW') {
+    $c[$k] = @($findings | Where-Object Severity -eq $k).Count
 }
 
-Write-Host "`n`n=============== MAPA DE EXECUCAO ===============" -ForegroundColor Cyan
-Write-Host "Ordem em que as regras tocam cada mensagem. 'Stop' corta as de baixo" -ForegroundColor DarkGray
-Write-Host "APENAS para a mensagem que casou com aquela regra." -ForegroundColor DarkGray
-$map | Sort-Object Ordem | Select-Object Ordem,
-    @{n='Ocu';e={ if ($_.Sistema) {'sys'} elseif ($_.Oculta) {'SIM'} else {''} }},
+Write-Host "`n`n=============== EXECUTION MAP ===============" -ForegroundColor Cyan
+Write-Host "Order in which the rules touch each message. 'Stop' cuts off the ones below" -ForegroundColor DarkGray
+Write-Host "ONLY for the message that matched that rule." -ForegroundColor DarkGray
+$map | Sort-Object Order | Select-Object Order,
+    @{n='Hid';e={ if ($_.System) {'sys'} elseif ($_.Hidden) {'YES'} else {''} }},
     @{n='Stop';e={ if ($_.Stop) {'STOP'} else {''} }}, Enabled,
-    @{n='Regra';e={ $_.Nome.Substring(0,[Math]::Min(42,$_.Nome.Length)) }},
-    @{n='Pasta';e={ $_.MoveToFolder.Substring(0,[Math]::Min(32,$_.MoveToFolder.Length)) }} |
+    @{n='Rule';e={ $_.RuleName.Substring(0,[Math]::Min(42,$_.RuleName.Length)) }},
+    @{n='Folder';e={ $_.MoveToFolder.Substring(0,[Math]::Min(32,$_.MoveToFolder.Length)) }} |
     Format-Table -AutoSize
 
-Write-Host "=================== RESUMO ===================" -ForegroundColor Cyan
+Write-Host "=================== SUMMARY ===================" -ForegroundColor Cyan
 Write-Host ("Mailbox ..............: {0}" -f $MailboxAddress)
-Write-Host ("Regras (visiveis/total): {0} / {1}" -f $visiveis.Count, $todas.Count)
-Write-Host ("Corrompidas ..........: {0}" -f $c['CORROMPIDA'])   -ForegroundColor $(if($c['CORROMPIDA']){'Red'}else{'Green'})
-Write-Host ("REGRAS MORTAS ........: {0}" -f $c['REGRA MORTA'])  -ForegroundColor $(if($c['REGRA MORTA']){'Red'}else{'Green'})
-Write-Host ("Ocultas de usuario ...: {0}" -f $c['OCULTA ATIVA']) -ForegroundColor $(if($c['OCULTA ATIVA']){'Red'}else{'Green'})
-Write-Host ("Destinos externos ....: {0}" -f $c['EXTERNO'])      -ForegroundColor $(if($c['EXTERNO']){'Red'}else{'Green'})
-Write-Host ("Apaga aviso do Exchange: {0}" -f $c['CEGUEIRA'])    -ForegroundColor $(if($c['CEGUEIRA']){'Yellow'}else{'Green'})
-Write-Host ("Redundantes/duplicadas : {0}" -f ($c['REDUNDANTE'] + $c['DUPLICADA'])) -ForegroundColor DarkGray
-Write-Host ("A revisar ............: {0}" -f $c['REVISAR'])      -ForegroundColor DarkGray
+Write-Host ("Rules (visible/total) : {0} / {1}" -f $visible.Count, $allRules.Count)
+Write-Host ("Corrupted ............: {0}" -f $c['CORRUPT'])       -ForegroundColor $(if($c['CORRUPT']){'Red'}else{'Green'})
+Write-Host ("DEAD RULES ...........: {0}" -f $c['DEAD RULE'])     -ForegroundColor $(if($c['DEAD RULE']){'Red'}else{'Green'})
+Write-Host ("Hidden user rules ....: {0}" -f $c['HIDDEN ACTIVE']) -ForegroundColor $(if($c['HIDDEN ACTIVE']){'Red'}else{'Green'})
+Write-Host ("External destinations : {0}" -f $c['EXTERNAL'])      -ForegroundColor $(if($c['EXTERNAL']){'Red'}else{'Green'})
+Write-Host ("Deletes Exchange notices: {0}" -f $c['BLINDSPOT'])   -ForegroundColor $(if($c['BLINDSPOT']){'Yellow'}else{'Green'})
+Write-Host ("Redundant/duplicate ..: {0}" -f ($c['REDUNDANT'] + $c['DUPLICATE'])) -ForegroundColor DarkGray
+Write-Host ("To review ............: {0}" -f $c['REVIEW'])        -ForegroundColor DarkGray
 
 if ($findings.Count -gt 0) {
     Write-Host ""
-    $findings | Where-Object { $_.Severidade -notin 'REDUNDANTE','DUPLICADA' } |
-        Select-Object Severidade,Item,Detalhe | Format-Table -AutoSize -Wrap
+    $findings | Where-Object { $_.Severity -notin 'REDUNDANT','DUPLICATE' } |
+        Select-Object Severity,Item,Detail | Format-Table -AutoSize -Wrap
 }
 
 Write-Host ""
-if ($c['CORROMPIDA'] -gt 0) {
-    Write-Host "VEREDITO: INCONCLUSIVO -- $($c['CORROMPIDA']) regra(s) ilegivel(eis). Rodar Remove-CorruptInboxRules.ps1 -DryRun." -ForegroundColor Red
-} elseif ($c['REGRA MORTA'] -gt 0) {
-    Write-Host "VEREDITO: $($c['REGRA MORTA']) regra(s) NUNCA executa(m). Essa e a queixa 'my rules are not working'." -ForegroundColor Red
-} elseif ($c['OCULTA ATIVA'] -gt 0) {
-    Write-Host "VEREDITO: ha regra ativa invisivel no Outlook do usuario. Mostrar a ele antes de mexer." -ForegroundColor Red
-} elseif ($c['EXTERNO'] -gt 0) {
-    Write-Host "VEREDITO: destino externo -- causa do bloqueio anti-autoforward." -ForegroundColor Red
+if ($c['CORRUPT'] -gt 0) {
+    Write-Host "VERDICT: INCONCLUSIVE -- $($c['CORRUPT']) unreadable rule(s). Run Remove-CorruptInboxRules.ps1 -DryRun." -ForegroundColor Red
+} elseif ($c['DEAD RULE'] -gt 0) {
+    Write-Host "VERDICT: $($c['DEAD RULE']) rule(s) NEVER run. That is the 'my rules are not working' complaint." -ForegroundColor Red
+} elseif ($c['HIDDEN ACTIVE'] -gt 0) {
+    Write-Host "VERDICT: there is an active rule invisible in the user's Outlook. Show it to them before touching anything." -ForegroundColor Red
+} elseif ($c['EXTERNAL'] -gt 0) {
+    Write-Host "VERDICT: external destination -- cause of the anti-autoforward block." -ForegroundColor Red
 } else {
-    Write-Host "VEREDITO: limpo. Sem regra morta, oculta, corrompida ou destino externo." -ForegroundColor Green
+    Write-Host "VERDICT: clean. No dead, hidden or corrupted rule and no external destination." -ForegroundColor Green
 }
 
 Write-Host ""
-if (Test-Path $csvMapa)    { Write-Host "Mapa ....: $csvMapa" }    else { Write-Host "ATENCAO: mapa NAO gravado" -ForegroundColor Red }
-if (Test-Path $csvAchados) { Write-Host "Achados .: $csvAchados" } else { Write-Host "ATENCAO: achados NAO gravado" -ForegroundColor Red }
+if (Test-Path $csvMap)      { Write-Host "Map .....: $csvMap" }      else { Write-Host "ATTENTION: map was NOT written" -ForegroundColor Red }
+if (Test-Path $csvFindings) { Write-Host "Findings : $csvFindings" } else { Write-Host "ATTENTION: findings were NOT written" -ForegroundColor Red }

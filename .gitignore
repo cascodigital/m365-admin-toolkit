@@ -1,0 +1,7 @@
+# Script output: may contain tenant and user data
+csv/
+*.csv
+*.xlsx
+*.log
+plan-*.json
+MailFlowForensics/

@@ -1,66 +1,99 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-    Show-DiskUsage.ps1 - Visualizador de uso de disco estilo TreeSize em PowerShell + WinForms.
-    Solucao propria, sem instalar software de terceiros (compliance-safe).
+    Show-DiskUsage.ps1 - TreeSize-style disk usage viewer built with PowerShell and WinForms.
+    Self-contained; no third-party software to install.
 
 .DESCRIPTION
-    Pergunta ao proprio Windows o tamanho FISICO alocado de cada arquivo (GetCompressedFileSizeW).
-    Com isso o numero bate com a coluna "Allocated" do TreeSize/WizTree:
-      - compressao NTFS, arquivos sparse e hardlinks sao tratados pelo SO (sem chute);
-      - arquivos so-na-nuvem (OneDrive Files On-Demand, desidratados) alocam ~0 e saem da conta;
-      - junctions/symlinks (reparse points de diretorio) nao sao percorridos (evita dupla contagem).
+    Asks Windows for the PHYSICAL allocated size of each file (GetCompressedFileSizeW),
+    so the numbers are close to the "Allocated" column in TreeSize/WizTree:
+      - NTFS compression and sparse files are accounted for by the OS;
+      - cloud-only files (OneDrive Files On-Demand, dehydrated) allocate ~0 and are not counted;
+      - directory junctions/symlinks (reparse points) are not traversed (avoids double counting);
+      - hard links are NOT de-duplicated: a file with several hard links is counted once per
+        link, so totals can be higher than TreeSize/WizTree (which de-duplicate) on folders
+        such as C:\Windows\WinSxS.
 
-    - Maior sempre no topo, com percentual relativo ao pai
-    - Mostra pastas E arquivos; arvore navegavel (expansao instantanea via cache)
-    - Menu de contexto (botao direito): Abrir no Explorer / Copiar caminho
+    - Largest items always on top, with percentage of the parent
+    - Shows folders AND files; navigable tree (instant expansion from cache)
+    - Context menu (right-click): Open in Explorer / Copy path
 
 .NOTES
-    Requer Administrador e PowerShell 5.1+. A varredura percorre o filesystem (mais lenta que ler a
-    MFT crua: 1-3 min para C: inteiro), em troca de um numero fisico confiavel. A GUI fica ocupada
-    durante a varredura; o status mostra qual pasta de topo esta sendo processada.
+    Requires Administrator and PowerShell 5.1+ (Windows PowerShell or PowerShell 7 on Windows).
+    The scan walks the file system (slower than reading the raw MFT: 1-3 min for a full C:),
+    in exchange for a reliable physical number. The GUI is busy during the scan; the status
+    bar shows which top-level folder is being processed.
+
+    If the script is not elevated, or not running in an STA thread (required by WinForms),
+    it relaunches itself with -STA (and UAC elevation if needed) using the same PowerShell
+    edition: pwsh when started from pwsh, otherwise powershell.exe.
 
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
 
+.EXAMPLE
+    pwsh -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1
 #>
 
-# ---- Requer Administrador; se possivel, relanca elevado com bypass so neste processo ----
+# ---- Requires Administrator and an STA thread; relaunch if needed (bypass only for that process) ----
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 $pr = New-Object Security.Principal.WindowsPrincipal($id)
-if (-not $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+$isAdmin = $pr.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isSta = [System.Threading.Thread]::CurrentThread.GetApartmentState() -eq [System.Threading.ApartmentState]::STA
+
+if (-not $isAdmin -or -not $isSta) {
     Write-Host ''
-    Write-Host '  Este script precisa de Administrador. Solicitando elevacao via UAC...' -ForegroundColor Yellow
+    if (-not $isAdmin) {
+        Write-Host '  This script requires Administrator. Requesting elevation via UAC...' -ForegroundColor Yellow
+    } else {
+        Write-Host '  WinForms requires an STA thread. Relaunching with -STA...' -ForegroundColor Yellow
+    }
 
     $scriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
     if ($scriptPath) {
-        $powershell51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Start-Process -FilePath $powershell51 -Verb RunAs -ArgumentList @(
+        # Prefer the same PowerShell edition; fall back to Windows PowerShell 5.1
+        $hostExe = $null
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            $candidate = Join-Path $PSHOME 'pwsh.exe'
+            if (Test-Path -LiteralPath $candidate) { $hostExe = $candidate }
+        }
+        if (-not $hostExe) {
+            $hostExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        }
+
+        $relaunchArgs = @(
             '-NoProfile',
+            '-STA',
             '-ExecutionPolicy',
             'Bypass',
             '-File',
             "`"$scriptPath`""
         )
+
+        if (-not $isAdmin) {
+            Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
+        } else {
+            Start-Process -FilePath $hostExe -ArgumentList $relaunchArgs
+        }
         exit 0
     }
 
-    Write-Host '  Nao consegui descobrir o caminho do script atual.' -ForegroundColor Red
-    Write-Host '  Rode: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1' -ForegroundColor Yellow
+    Write-Host '  Could not determine the path of the current script.' -ForegroundColor Red
+    Write-Host '  Run: powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File .\tools\Show-DiskUsage.ps1' -ForegroundColor Yellow
     Write-Host ''
-    Read-Host '  Pressione Enter para sair'
+    Read-Host '  Press Enter to exit'
     exit 1
 }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Blindagem: qualquer erro fatal vira MessageBox + log (senao a janela fecha sem mostrar nada)
+# Safety net: any fatal error becomes a MessageBox + log (otherwise the window closes silently)
 try {
 
 # ============================================================================
-#  Motor: varre o filesystem e pega o tamanho FISICO alocado de cada arquivo
-#  diretamente do Windows (GetCompressedFileSizeW). Sem parsear NTFS na mao.
+#  Engine: walks the file system and gets the PHYSICAL allocated size of each file
+#  directly from Windows (GetCompressedFileSizeW). No manual NTFS parsing.
 # ============================================================================
 $cs = @'
 using System;
@@ -68,32 +101,32 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 
-namespace CascoDigital {
+namespace DiskUsageTool {
   public class DiskWalker {
     [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern uint GetCompressedFileSizeW(string path, out uint high);
 
     const uint INVALID_SIZE = 0xFFFFFFFF;
-    const long SANITY_CAP   = 0x4000000000000L; // 1 PB: tamanho maior que isso num arquivo = lixo
+    const long SANITY_CAP   = 0x4000000000000L; // 1 PB: a single file larger than this is treated as garbage
 
     public Dictionary<string, long> DirSize =
         new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
     public long FileCount;
 
-    // Prefixo \\?\ para vencer o limite de MAX_PATH (260) na chamada de tamanho
+    // \\?\ prefix to get past the MAX_PATH (260) limit in the size call
     static string Long(string p) {
       if (p.StartsWith("\\\\?\\")) return p;
       if (p.StartsWith("\\\\"))    return "\\\\?\\UNC\\" + p.Substring(2);
       return "\\\\?\\" + p;
     }
 
-    // Normaliza a chave do cache. "C:\" e "C:" viram "C:"; demais perdem a barra final.
+    // Normalizes the cache key. "C:\" and "C:" become "C:"; other paths lose the trailing backslash.
     static string Key(string p) {
       p = p.TrimEnd('\\');
       return p;
     }
 
-    // Tamanho FISICO alocado de um arquivo, direto do Windows. 0 se falhar ou vier lixo.
+    // PHYSICAL allocated size of a file, from Windows. 0 on failure or garbage values.
     public long FileAlloc(string path) {
       uint high;
       uint low = GetCompressedFileSizeW(Long(path), out high);
@@ -108,8 +141,8 @@ namespace CascoDigital {
       return DirSize.TryGetValue(Key(path), out v) ? v : 0;
     }
 
-    // Varre uma subarvore ITERATIVAMENTE (pilha explicita -> sem StackOverflow), usando a
-    // enumeracao nativa do .NET (DirectoryInfo) para percorrer e GetCompressedFileSize para medir.
+    // Walks a subtree ITERATIVELY (explicit stack -> no StackOverflow), using .NET
+    // enumeration (DirectoryInfo) to traverse and GetCompressedFileSize to measure.
     public long ScanTree(string root) {
       string r = Key(root);
       Dictionary<string, long>   direct = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -122,7 +155,7 @@ namespace CascoDigital {
         string dir = stack.Pop();
         long files = 0;
         try {
-          // "C:" precisa virar "C:\" para o DirectoryInfo apontar para a raiz, nao o dir atual
+          // "C:" must become "C:\" so DirectoryInfo points to the root, not the current directory
           string dpath = (dir.Length == 2 && dir[1] == ':') ? dir + "\\" : dir;
           DirectoryInfo di = new DirectoryInfo(dpath);
           foreach (FileSystemInfo fsi in di.EnumerateFileSystemInfos()) {
@@ -131,9 +164,9 @@ namespace CascoDigital {
             bool isDir = (a & FileAttributes.Directory)     != 0;
             bool isRep = (a & FileAttributes.ReparsePoint)  != 0;
             if (isDir) {
-              if (isRep) continue;                 // junction/symlink: nao percorre
+              if (isRep) continue;                 // junction/symlink: not traversed
               string full = Key(fsi.FullName);
-              if (!direct.ContainsKey(full)) {     // guarda contra qualquer ciclo
+              if (!direct.ContainsKey(full)) {     // guard against any cycle
                 direct[full] = 0; parent[full] = dir; order.Add(full); stack.Push(full);
               }
             } else {
@@ -141,11 +174,11 @@ namespace CascoDigital {
               FileCount++;
             }
           }
-        } catch { }                                // acesso negado / caminho longo: ignora a pasta
-        direct[dir] = files;                       // bytes dos arquivos diretos desta pasta
+        } catch { }                                // access denied / long path: skip the folder
+        direct[dir] = files;                       // bytes of the files directly in this folder
       }
 
-      // Rollup do mais fundo pro mais raso: cada pasta soma seu total ao pai.
+      // Roll up from deepest to shallowest: each folder adds its total to its parent.
       for (int i = 0; i < order.Count; i++) DirSize[order[i]] = direct[order[i]];
       for (int i = order.Count - 1; i >= 0; i--) {
         string d = order[i], p;
@@ -156,21 +189,21 @@ namespace CascoDigital {
   }
 }
 '@
-# Namespace versionado pelo hash do proprio C#: cada versao do codigo vira uma classe com nome
-# unico. Assim, rodar uma versao NOVA na mesma janela nao reusa a classe antiga ja carregada, e
-# rodar a versao identica de novo nao tenta recompilar (sem TYPE_ALREADY_EXISTS).
+# Namespace versioned by a hash of the C# source: each code version becomes a uniquely named
+# class. Running a NEW version in the same session does not reuse the old loaded class, and
+# running the identical version again does not recompile (no TYPE_ALREADY_EXISTS).
 $verHash = ([BitConverter]::ToString(
     [System.Security.Cryptography.MD5]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($cs))
 )).Replace('-','').Substring(0,12)
-$ns = "CascoDigital_$verHash"
-$cs = $cs.Replace('namespace CascoDigital {', "namespace $ns {")
+$ns = "DiskUsageTool_$verHash"
+$cs = $cs.Replace('namespace DiskUsageTool {', "namespace $ns {")
 $script:TypeName = "$ns.DiskWalker"
 if (-not ([System.Management.Automation.PSTypeName]$script:TypeName).Type) {
     Add-Type -TypeDefinition $cs -Language CSharp -ErrorAction Stop
 }
 
 # ============================================================================
-#  Estado e helpers
+#  State and helpers
 # ============================================================================
 $script:Walker = $null
 $MAX_CHILDREN  = 5000
@@ -187,7 +220,7 @@ function Test-Reparse($item) {
     return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
 }
 
-# Popula os filhos de um node (uma camada). Pastas usam o cache; arquivos consultam o alocado na hora.
+# Populates the children of a node (one level). Folders use the cache; files are measured on demand.
 function Build-Children($node) {
     $node.Nodes.Clear()
     $path = $node.Name
@@ -195,7 +228,7 @@ function Build-Children($node) {
     $items = @()
     try {
         foreach ($d in (Get-ChildItem -LiteralPath $path -Directory -Force -ErrorAction SilentlyContinue)) {
-            if (Test-Reparse $d) { continue }   # junction/symlink: nao contamos (igual a varredura)
+            if (Test-Reparse $d) { continue }   # junction/symlink: not counted (same as the scan)
             $items += [pscustomobject]@{ Name=$d.Name; Path=$d.FullName; Size=($script:Walker.DirAlloc($d.FullName)); IsDir=$true }
         }
         foreach ($f in (Get-ChildItem -LiteralPath $path -File -Force -ErrorAction SilentlyContinue)) {
@@ -208,16 +241,16 @@ function Build-Children($node) {
     $shown = 0
     foreach ($c in $sorted) {
         if ($shown -ge $MAX_CHILDREN) {
-            [void]$node.Nodes.Add((New-Object System.Windows.Forms.TreeNode("... (+$($sorted.Count - $shown) itens nao exibidos)")))
+            [void]$node.Nodes.Add((New-Object System.Windows.Forms.TreeNode("... (+$($sorted.Count - $shown) items not shown)")))
             break
         }
         $pct = if ($parentSize -gt 0) { 100.0 * $c.Size / $parentSize } else { 0 }
         $icon = if ($c.IsDir) { '[DIR]' } else { '     ' }
         $tn = New-Object System.Windows.Forms.TreeNode
         $tn.Text = ('{0} {1}  {2}  ({3:N1}%)' -f $icon, $c.Name, (Format-Size $c.Size), $pct)
-        $tn.Name = $c.Path     # caminho completo (para Explorer/Copiar e re-expansao)
-        # Degrade pastel relativo ao maior irmao: vermelho = maior, verde = menor.
-        # Canal minimo 200 mantem o fundo claro, entao o texto preto continua legivel.
+        $tn.Name = $c.Path     # full path (for Explorer/Copy and re-expansion)
+        # Pastel gradient relative to the largest sibling: red = largest, green = smallest.
+        # Minimum channel 200 keeps the background light so black text stays readable.
         $frac = if ($maxSize -gt 0) { [double]$c.Size / $maxSize } else { 0 }
         $r = [int][math]::Min(255, 200 + 110 * $frac)
         $g = [int][math]::Min(255, 200 + 110 * (1 - $frac))
@@ -246,7 +279,7 @@ $panel.Controls.AddRange(@($txt,$btn))
 
 $status = New-Object System.Windows.Forms.StatusStrip
 $lbl = New-Object System.Windows.Forms.ToolStripStatusLabel
-$lbl.Text = 'Pronto. Digite um caminho (ex: C:\) e clique Scan. A varredura pode levar 1-3 min.'
+$lbl.Text = 'Ready. Enter a path (e.g. C:\) and click Scan. The scan can take 1-3 min.'
 [void]$status.Items.Add($lbl)
 
 $tree = New-Object System.Windows.Forms.TreeView
@@ -255,8 +288,8 @@ $tree.Font = New-Object System.Drawing.Font('Consolas',10)
 $tree.HideSelection = $false
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
-$miOpen = $menu.Items.Add('Abrir no Explorer')
-$miCopy = $menu.Items.Add('Copiar caminho')
+$miOpen = $menu.Items.Add('Open in Explorer')
+$miCopy = $menu.Items.Add('Copy path')
 $tree.ContextMenuStrip = $menu
 
 $tree.Add_NodeMouseClick({
@@ -282,7 +315,7 @@ $tree.Add_BeforeExpand({
 $btn.Add_Click({
     $root = $txt.Text
     if (-not (Test-Path -LiteralPath $root)) {
-        [System.Windows.Forms.MessageBox]::Show("Caminho invalido.","Erro") | Out-Null; return
+        [System.Windows.Forms.MessageBox]::Show("Invalid path.","Error") | Out-Null; return
     }
     $tree.Nodes.Clear()
     $form.Cursor = 'WaitCursor'
@@ -291,15 +324,15 @@ $btn.Add_Click({
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $total = 0L
 
-    # Percorre as pastas de topo uma a uma, so para dar progresso visivel no status
+    # Walk the top-level folders one at a time, only to show progress in the status bar
     $topDirs = @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue)
     foreach ($d in $topDirs) {
         if (Test-Reparse $d) { continue }
-        $lbl.Text = "Varrendo $($d.FullName) ...  ($($script:Walker.FileCount) arquivos ate agora)"
+        $lbl.Text = "Scanning $($d.FullName) ...  ($($script:Walker.FileCount) files so far)"
         [System.Windows.Forms.Application]::DoEvents()
         $total += $script:Walker.ScanTree($d.FullName)
     }
-    # Arquivos soltos na raiz
+    # Files directly in the root
     foreach ($f in (Get-ChildItem -LiteralPath $root -File -Force -ErrorAction SilentlyContinue)) {
         $total += $script:Walker.FileAlloc($f.FullName)
     }
@@ -307,14 +340,14 @@ $btn.Add_Click({
     $sw.Stop()
 
     $rootNode = New-Object System.Windows.Forms.TreeNode
-    $rootNode.Name = $root   # caminho completo COM barra ("C:\"); "C:" sem barra = dir atual da unidade
+    $rootNode.Name = $root   # full path WITH backslash ("C:\"); "C:" without it = current directory of the drive
     $rootNode.Text = ('[DIR] {0}  {1}  (100%)' -f $root, (Format-Size $total))
     [void]$rootNode.Nodes.Add((New-Object System.Windows.Forms.TreeNode('...')))
     [void]$tree.Nodes.Add($rootNode)
     Build-Children $rootNode
     $rootNode.Expand()
     $form.Cursor = 'Default'
-    $lbl.Text = "OK: $($script:Walker.FileCount) arquivos em $([math]::Round($sw.Elapsed.TotalSeconds,1))s  |  $root (fisico) = $(Format-Size $total)"
+    $lbl.Text = "OK: $($script:Walker.FileCount) files in $([math]::Round($sw.Elapsed.TotalSeconds,1))s  |  $root (physical) = $(Format-Size $total)"
 })
 
 $form.Controls.Add($tree)
@@ -329,9 +362,9 @@ catch {
     try {
         [System.Windows.Forms.MessageBox]::Show(
             $msg.Substring(0, [Math]::Min(2000, $msg.Length)),
-            'Show-DiskUsage - ERRO FATAL', 'OK', 'Error') | Out-Null
+            'Show-DiskUsage - FATAL ERROR', 'OK', 'Error') | Out-Null
     } catch {
         Write-Host $msg -ForegroundColor Red
-        Read-Host 'Pressione Enter para sair'
+        Read-Host 'Press Enter to exit'
     }
 }

@@ -1,110 +1,224 @@
 <#
 .SYNOPSIS
-    Configuracao automatizada de catch-all para um ou multiplos dominios no Microsoft 365.
+    Configures a catch-all mailbox for one or more domains in Microsoft 365 / Exchange Online.
 
 .DESCRIPTION
-    Script PowerShell interativo para implementacao de coletor geral (catch-all) em tenants M365.
-    - Configura dominios selecionados como InternalRelay (essencial para catch-all).
-    - Cria Grupo de Distribuicao Dinamico que inclui automaticamente todos os usuarios reais do tenant.
-    - Cria Regra de Transporte que redireciona emails para enderecos inexistentes.
-    - Garante a exclusao de usuarios validos da regra (evita redirecionar quem ja possui caixa).
-    - Realiza limpeza automatica de regras/grupos anteriores com os mesmos nomes/emails.
+    Implements a catch-all: mail sent to NON-EXISTENT addresses in the selected domains is
+    redirected to one collector mailbox, while mail to any EXISTING recipient is delivered
+    normally.
 
-    Funcionalidades:
-    - Suporte a multiplos dominios (separados por virgula).
-    - Filtro OPATH otimizado para evitar erros de wildcard inicial (*).
-    - Prioridade automatica (Prioridade 0) no fluxo de e-mail.
-    - Reset total de configuracoes anteriores antes da nova aplicacao.
+    What the script does:
+      1. Removes the transport rule and exception group created by a previous run
+         (same names / same group address) so it can be re-run safely.
+      2. Sets each selected accepted domain to InternalRelay (required: with an
+         Authoritative domain, Exchange rejects unknown recipients with NDR 5.1.10
+         before any transport rule runs).
+      3. Creates a dynamic distribution group (DDG) that contains EVERY mail-enabled
+         recipient type in the tenant (see "How existing recipients are excluded").
+      4. Creates a transport rule (priority 0) that redirects mail for the selected
+         domains to the collector mailbox, EXCEPT when the recipient is a member of that
+         DDG, or is one of the recipients listed in the rule's ExceptIfSentTo list.
 
-.PARAMETER None
-    Script interativo via terminal.
+    HOW EXISTING RECIPIENTS ARE EXCLUDED (the robust part)
+    Earlier versions only excluded RecipientTypeDetails 'UserMailbox', so mail sent to
+    shared mailboxes, groups, Microsoft 365 groups, room mailboxes, mail users and mail
+    contacts was wrongly redirected to the catch-all. Now:
+
+      a) The exception DDG uses a RecipientFilter that covers all mail-enabled types:
+         user/shared/room/equipment/scheduling mailboxes, Microsoft 365 groups
+         (GroupMailbox), distribution and mail-enabled security groups, mail users,
+         guest mail users, mail contacts, mail-enabled public folders and team mailboxes.
+         Because it is dynamic, recipients created later are covered automatically.
+
+      b) Coverage is verified before the rule is created: the script compares
+         Get-Recipient (all recipients) with the DDG preview (Get-Recipient
+         -RecipientPreviewFilter). Any recipient the DDG does NOT cover - for example
+         other dynamic distribution groups, which cannot be members of a DDG - is added
+         explicitly to the rule's ExceptIfSentTo list and printed on screen.
+         Items in (b) are a snapshot: if you later create a NEW dynamic distribution
+         group in a catch-all domain, re-run the script (it is idempotent).
+
+    This is the established catch-all pattern for Exchange Online (InternalRelay domain +
+    dynamic group of existing recipients + transport rule with an exception), extended so
+    the exception covers every recipient type and is verified at setup time.
+
+.PARAMETER AdminUPN
+    Admin UPN used for Connect-ExchangeOnline. Prompted if omitted.
+
+.PARAMETER Domains
+    One or more accepted domains to configure (comma-separated string or array). Prompted if omitted.
+
+.PARAMETER CatchAllMailbox
+    Mailbox that receives all mail sent to non-existent addresses. Prompted if omitted.
+
+.PARAMETER ExceptionGroupAddress
+    SMTP address for the exception dynamic distribution group. Prompted if omitted.
 
 .EXAMPLE
-    .\Configure-CatchAll-MultiDomain.ps1
-    # Dominios alvo: empresa1.com.br, empresa2.com.br
-    # Email coletor: sac@empresa1.com.br
-    # Resultado: Qualquer email enviado para enderecos inexistentes em ambos os dominios sera entregue no SAC.
+    .\Set-CatchAllMailbox.ps1
+    Fully interactive.
+
+.EXAMPLE
+    .\Set-CatchAllMailbox.ps1 -AdminUPN ADMIN@DOMAIN.COM -Domains domain.com,domain2.com -CatchAllMailbox catchall@domain.com -ExceptionGroupAddress catchall-exception@domain.com
+    Any email sent to a non-existent address in domain.com or domain2.com is delivered to catchall@domain.com.
+
+.EXAMPLE
+    .\Set-CatchAllMailbox.ps1 -WhatIf
+    Shows what would be removed, changed and created without changing anything.
 
 .NOTES
-    Autor          : Andre Kittler
-    Versao         : 3.0
-    Compatibilidade: PowerShell 5.1+ / ExchangeOnlineManagement V3
-    Requisito      : Permissao de Global Admin ou Exchange Admin.
+    Version       : 3.1
+    Compatibility : PowerShell 5.1+ / ExchangeOnlineManagement 3.x
+    Requirement   : Exchange Administrator (or Global Administrator).
 
-    IMPORTANTE: 
-    - A propagacao da alteracao para 'InternalRelay' pode levar ate 60 minutos.
-    - Durante este tempo, erros de 'Address not found' (NDR 5.1.10) sao normais.
+    IMPORTANT:
+    - Propagation of the InternalRelay change can take up to 60 minutes.
+      During that time 'Address not found' NDRs (5.1.10) are normal.
+    - Dynamic group membership is recalculated periodically by Exchange Online; a brand-new
+      recipient can take a short while to be recognized by the exception.
+    - The catch-all mailbox itself is an existing recipient, so it is excluded (no loop).
 #>
+
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+param(
+    [string]$AdminUPN,
+    [string[]]$Domains,
+    [string]$CatchAllMailbox,
+    [string]$ExceptionGroupAddress
+)
 
 $ErrorActionPreference = 'Stop'
 $WarningPreference = 'SilentlyContinue'
 
-# --- INPUTS INTERATIVOS ---
-$upnAdmin = Read-Host "Email do Administrador (UPN)"
-$dominiosInput = Read-Host "Dominios alvo (separe por virgula: dom1.com, dom2.com)"
-$emailColetor = Read-Host "Email que recebera tudo (Caixa Coletora)"
-$emailGrupoExcecao = Read-Host "Email para o Grupo Dinamico de Excecao"
+# --- INTERACTIVE INPUT (only for what was not passed as a parameter) ---
+if (-not $AdminUPN)              { $AdminUPN              = Read-Host "Administrator email (UPN)" }
+if (-not $Domains)               { $Domains               = Read-Host "Target domains (comma-separated: dom1.com, dom2.com)" }
+if (-not $CatchAllMailbox)       { $CatchAllMailbox       = Read-Host "Mailbox that will receive everything (catch-all mailbox)" }
+if (-not $ExceptionGroupAddress) { $ExceptionGroupAddress = Read-Host "Email address for the exception dynamic group" }
 
-$nomeRegra = "Catch-All Global - MultiDominio"
-$nomeGrupoExcecao = "Excecao Catch-all - Usuarios Reais"
-$dominios = $dominiosInput.Split(',').Trim()
+$ruleName       = "Catch-All Global - MultiDomain"
+$groupName      = "Catch-All Exception - All Recipients"
+# Names used by earlier (Portuguese) versions of this script - cleaned up too, so a re-run never leaves duplicates.
+$legacyRuleName = "Catch-All Global - MultiDominio"
 
-Write-Host "Iniciando conexao com Exchange Online..." -ForegroundColor Cyan
+$domainList = @($Domains | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($domainList.Count -eq 0) { throw "No domain provided." }
+
+# Every mail-enabled recipient type. DDGs cannot contain other DDGs - those are handled
+# by the coverage check below (added to ExceptIfSentTo).
+$exceptionFilter = "(RecipientTypeDetails -eq 'UserMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'SharedMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'RoomMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'EquipmentMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'SchedulingMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'TeamMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'GroupMailbox') -or " +
+                   "(RecipientTypeDetails -eq 'MailUniversalDistributionGroup') -or " +
+                   "(RecipientTypeDetails -eq 'MailUniversalSecurityGroup') -or " +
+                   "(RecipientTypeDetails -eq 'MailNonUniversalGroup') -or " +
+                   "(RecipientTypeDetails -eq 'RoomList') -or " +
+                   "(RecipientTypeDetails -eq 'MailUser') -or " +
+                   "(RecipientTypeDetails -eq 'GuestMailUser') -or " +
+                   "(RecipientTypeDetails -eq 'MailContact') -or " +
+                   "(RecipientTypeDetails -eq 'PublicFolder')"
+
+Write-Host "Connecting to Exchange Online..." -ForegroundColor Cyan
 Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-Connect-ExchangeOnline -UserPrincipalName $upnAdmin -ShowBanner:$false
+Connect-ExchangeOnline -UserPrincipalName $AdminUPN -ShowBanner:$false
 
 try {
-    # --- FASE 1: LIMPEZA (RESET) ---
-    Write-Host "Limpando configuracoes anteriores para evitar duplicidade..." -ForegroundColor Yellow
-    
-    if (Get-TransportRule -Identity $nomeRegra -ErrorAction SilentlyContinue) {
-        Remove-TransportRule -Identity $nomeRegra -Confirm:$false
-        Write-Host "Regra antiga removida." -ForegroundColor Gray
+    # --- PHASE 1: CLEANUP (RESET) ---
+    Write-Host "Removing previous configuration to avoid duplicates..." -ForegroundColor Yellow
+
+    foreach ($rn in @($ruleName, $legacyRuleName)) {
+        if (Get-TransportRule -Identity $rn -ErrorAction SilentlyContinue) {
+            if ($PSCmdlet.ShouldProcess("Transport rule '$rn'", "Remove")) {
+                Remove-TransportRule -Identity $rn -Confirm:$false
+                Write-Host "Old rule '$rn' removed." -ForegroundColor Gray
+            }
+        }
     }
 
-    if (Get-DynamicDistributionGroup -Identity $emailGrupoExcecao -ErrorAction SilentlyContinue) {
-        Remove-DynamicDistributionGroup -Identity $emailGrupoExcecao -Confirm:$false
-        Write-Host "Grupo antigo removido." -ForegroundColor Gray
+    if (Get-DynamicDistributionGroup -Identity $ExceptionGroupAddress -ErrorAction SilentlyContinue) {
+        if ($PSCmdlet.ShouldProcess("Dynamic distribution group '$ExceptionGroupAddress'", "Remove")) {
+            Remove-DynamicDistributionGroup -Identity $ExceptionGroupAddress -Confirm:$false
+            Write-Host "Old group removed." -ForegroundColor Gray
+        }
     }
 
-    # --- FASE 2: CONFIGURACAO DE DOMINIO ---
-    foreach ($dom in $dominios) {
-        Write-Host "Configurando dominio $dom como InternalRelay..." -ForegroundColor Cyan
-        Set-AcceptedDomain -Identity $dom -DomainType InternalRelay
+    # --- PHASE 2: DOMAIN CONFIGURATION ---
+    foreach ($dom in $domainList) {
+        if ($PSCmdlet.ShouldProcess("Accepted domain '$dom'", "Set DomainType InternalRelay")) {
+            Write-Host "Setting domain $dom to InternalRelay..." -ForegroundColor Cyan
+            Set-AcceptedDomain -Identity $dom -DomainType InternalRelay
+        }
     }
 
-    # --- FASE 3: GRUPO DINAMICO DE EXCECAO ---
-    # Filtro simplificado para evitar erro de wildcard inicial no OPATH do Exchange
-    $finalFilter = "(RecipientTypeDetails -eq 'UserMailbox')"
-    
-    Write-Host "Criando grupo de excecao para usuarios reais..." -ForegroundColor Cyan
-    New-DynamicDistributionGroup -Name $nomeGrupoExcecao `
-        -PrimarySmtpAddress $emailGrupoExcecao `
-        -RecipientFilter $finalFilter `
-        -ErrorAction Stop
+    # --- PHASE 3: EXCEPTION DYNAMIC GROUP ---
+    if ($PSCmdlet.ShouldProcess("Dynamic distribution group '$ExceptionGroupAddress'", "Create (all mail-enabled recipients)")) {
+        Write-Host "Creating exception group for all existing recipients..." -ForegroundColor Cyan
+        New-DynamicDistributionGroup -Name $groupName `
+            -PrimarySmtpAddress $ExceptionGroupAddress `
+            -RecipientFilter $exceptionFilter `
+            -ErrorAction Stop | Out-Null
+    }
 
-    # --- FASE 4: REGRA DE TRANSPORTE CATCH-ALL ---
-    Write-Host "Criando regra de transporte com prioridade 0..." -ForegroundColor Cyan
+    # --- PHASE 4: COVERAGE CHECK ---
+    # Any recipient with an address in a catch-all domain that the DDG does not cover is
+    # added explicitly to ExceptIfSentTo, so it is never redirected.
+    Write-Host "Checking that every existing recipient is covered by the exception..." -ForegroundColor Cyan
+    $covered = @{}
+    Get-Recipient -RecipientPreviewFilter $exceptionFilter -ResultSize Unlimited |
+        ForEach-Object { $covered[[string]$_.PrimarySmtpAddress] = $true }
+
+    $uncovered = @(Get-Recipient -ResultSize Unlimited | Where-Object {
+        -not $covered.ContainsKey([string]$_.PrimarySmtpAddress) -and
+        [string]$_.PrimarySmtpAddress -ne $ExceptionGroupAddress -and
+        @($_.EmailAddresses | Where-Object {
+            $addr = ([string]$_) -replace '^smtp:', ''
+            $domainList -contains ($addr.Split('@')[-1])
+        }).Count -gt 0
+    })
+
+    $explicitExceptions = @()
+    if ($uncovered.Count -gt 0) {
+        Write-Host "Recipients not covered by the dynamic group (added to the rule exception list):" -ForegroundColor Yellow
+        $uncovered | ForEach-Object { Write-Host ("  - {0}  [{1}]" -f $_.PrimarySmtpAddress, $_.RecipientTypeDetails) -ForegroundColor Yellow }
+        $explicitExceptions = @($uncovered | ForEach-Object { [string]$_.PrimarySmtpAddress })
+    } else {
+        Write-Host "All existing recipients in the selected domains are covered." -ForegroundColor Green
+    }
+
+    # --- PHASE 5: CATCH-ALL TRANSPORT RULE ---
     $ruleParams = @{
-        Name = $nomeRegra
-        RecipientDomainIs = $dominios
-        RedirectMessageTo = $emailColetor
-        ExceptIfSentToMemberOf = $emailGrupoExcecao
-        Priority = 0
-        StopRuleProcessing = $true
+        Name                   = $ruleName
+        RecipientDomainIs      = $domainList
+        RedirectMessageTo      = $CatchAllMailbox
+        ExceptIfSentToMemberOf = $ExceptionGroupAddress
+        Priority               = 0
+        StopRuleProcessing     = $true
     }
-    New-TransportRule @ruleParams
+    if ($explicitExceptions.Count -gt 0) { $ruleParams.ExceptIfSentTo = $explicitExceptions }
+
+    if ($PSCmdlet.ShouldProcess("Transport rule '$ruleName'", "Create (priority 0, redirect to $CatchAllMailbox)")) {
+        Write-Host "Creating transport rule with priority 0..." -ForegroundColor Cyan
+        New-TransportRule @ruleParams | Out-Null
+    }
 
     Write-Host "`n===========================================================" -ForegroundColor Green
-    Write-Host "CONFIGURACAO CONCLUIDA COM SUCESSO" -ForegroundColor Green
-    Write-Host "Dominios: $($dominios -join ', ')" -ForegroundColor White
-    Write-Host "Destino: $emailColetor" -ForegroundColor White
-    Write-Host "Propagacao: Aguarde 60 minutos para validacao final." -ForegroundColor Yellow
+    if ($WhatIfPreference) {
+        Write-Host "WHATIF: NOTHING WAS CHANGED" -ForegroundColor Yellow
+    } else {
+        Write-Host "CONFIGURATION COMPLETED" -ForegroundColor Green
+    }
+    Write-Host "Domains    : $($domainList -join ', ')" -ForegroundColor White
+    Write-Host "Destination: $CatchAllMailbox" -ForegroundColor White
+    Write-Host "Propagation: allow up to 60 minutes before final validation." -ForegroundColor Yellow
     Write-Host "===========================================================" -ForegroundColor Green
 }
 catch {
-    Write-Host "ERRO NA EXECUCAO: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "EXECUTION ERROR: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-Write-Host "Sessao encerrada." -ForegroundColor Cyan
+Write-Host "Session closed." -ForegroundColor Cyan
 Disconnect-ExchangeOnline -Confirm:$false

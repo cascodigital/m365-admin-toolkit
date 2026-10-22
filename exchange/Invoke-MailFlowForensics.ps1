@@ -1,42 +1,64 @@
 <#
 .SYNOPSIS
-    Investiga reclamacao de "meu email caiu na quarentena" no Exchange Online.
-    Interativo por padrao, parametrizavel para automacao.
+    Investigates "my email went to quarantine" complaints in Exchange Online.
+    Interactive by default, parameterizable for automation.
 
 .DESCRIPTION
-    v3.0 - reescrito depois de um caso real de quarentena (10/09/2026), que expos
-    a armadilha central desta investigacao:
+    v3.0 - rewritten after a real quarantine case, which exposed
+    the central trap of this investigation:
 
-        QUARENTENA indexa o P2  (From: do cabecalho, o que o usuario ve)
-        MESSAGE TRACE indexa o P1 (envelope MAIL FROM / Return-Path)
+        QUARANTINE indexes the P2  (header From:, what the user sees)
+        MESSAGE TRACE indexes the P1 (envelope MAIL FROM / Return-Path)
 
-    Quando o remetente e caixa compartilhada, alias ou automacao, P1 != P2 e
-    buscar o trace pelo endereco reclamado devolve ZERO resultados - falso
-    negativo com cara de conclusao. Esta versao NUNCA correlaciona por remetente:
-    usa MessageId, que e imune a divergencia.
+    When the sender is a shared mailbox, alias or automation, P1 != P2 and
+    searching the trace by the reported address returns ZERO results - a false
+    negative that looks like a conclusion. This version NEVER correlates by sender:
+    it uses MessageId, which is immune to the divergence.
 
-    Segunda armadilha coberta: Status=Delivered no trace NAO significa entrega
-    limpa. Mensagem quarentenada e depois liberada aparece como Delivered.
-    A prova da retencao esta no ReleaseStatus da quarentena.
+    Second trap covered: Status=Delivered in the trace does NOT mean clean
+    delivery. A message that was quarantined and later released shows as Delivered.
+    The proof of the hold is in the quarantine ReleaseStatus.
 
 .PARAMETER Recipient
-    Caixa que reclamou. Opcional se -Sender for informado.
+    Mailbox that complained. Optional if -Sender is provided.
 
 .PARAMETER Sender
-    Remetente. Aceita 'user@dominio.com', '@dominio.com' ou 'dominio.com'.
-    Mesmo com endereco completo, o filtro de trace opera por DOMINIO (anti-P1/P2).
+    Sender. Accepts 'user@domain.com', '@domain.com' or 'domain.com'.
+    Even with a full address, the trace filter works by DOMAIN (anti-P1/P2).
+
+.PARAMETER Days
+    Look-back window in days. Default 7 (prompted in interactive mode).
+
+.PARAMETER Detail
+    Also pull per-message event detail (Get-MessageTraceDetailV2) for up to 25 messages.
+
+.PARAMETER NonInteractive
+    Do not prompt; use only the parameters given.
+
+.PARAMETER UPN
+    Admin account used to connect to Exchange Online if no session is active.
+
+.PARAMETER OutRoot
+    Root folder for the evidence package. Default: 'MailFlowForensics' subfolder next to the
+    script. CSVs go to the 'csv' subfolder next to the script unless -OutRoot is given.
+
+.OUTPUTS
+    Evidence folder with SUMMARY.txt, ticket.txt (internal note + end-user reply draft),
+    console.log and CSVs (correlated, quarantine, messagetrace, orphans, ...).
 
 .EXAMPLE
-    .\Invoke-MailFlowForensics.ps1
+    .\Invoke-MailFlowForensics.ps1 -UPN ADMIN@DOMAIN.COM
 
 .EXAMPLE
-    .\Invoke-MailFlowForensics.ps1 -Recipient user@contoso.com -Sender @fornecedor.com -Days 7
+    .\Invoke-MailFlowForensics.ps1 -UPN ADMIN@DOMAIN.COM -Recipient user@domain.com -Sender @external.com -Days 7
 
 .NOTES
-    Ambiente : Exchange Online
-    Requer   : ExchangeOnlineManagement 3.x + PIM ativo
-    Autor    : Andre Kittler da Costa
-    Versao   : 3.0
+    Environment : Exchange Online
+    Requires    : ExchangeOnlineManagement 3.x + an Exchange / Defender role with access to
+                  quarantine and message trace (activated in PIM, if you use it)
+    Message trace uses Get-MessageTraceV2; the legacy Get-MessageTrace is only used as a
+    fallback when V2 is not available in the session.
+    Version     : 3.0
 #>
 
 [CmdletBinding()]
@@ -47,13 +69,14 @@ param(
     [switch] $Detail,
     [switch] $NonInteractive,
     [Parameter(Mandatory = $true)][string] $UPN,
-    [string] $OutRoot                       # default = subpasta ao lado do script
+    [string] $OutRoot                       # default = subfolder next to the script
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
-# Saida ao lado do script, nao no Desktop.
+# Output next to the script, not on the Desktop.
+$__outRootGiven = [bool]$OutRoot
 if (-not $OutRoot) {
     $base = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
     $OutRoot = Join-Path $base 'MailFlowForensics'
@@ -70,13 +93,13 @@ function Ask {
         if (-not $a -and $Default)    { return $Default }
         if (-not $a -and $AllowEmpty) { return '' }
         if ($a) { return $a }
-        Say '   Resposta vazia.' DarkYellow
+        Say '   Empty answer.' DarkYellow
     }
 }
 function Norm-MsgId { param($v) if ($v) { $v.Trim().Trim('<','>').ToLower() } else { '' } }
 #endregion
 
-#region ------------------------------------------------- NORMALIZACAO INPUT
+#region ------------------------------------------------- INPUT NORMALIZATION
 function Resolve-SenderInput {
     param([string]$Raw)
     if (-not $Raw) { return $null }
@@ -94,38 +117,38 @@ function Test-EmailAddress { param([string]$v) $v -match '^[^@\s]+@[^@\s]+\.[^@\
 #endregion
 
 Clear-Host
-Head 'MAIL FLOW FORENSICS v3.0  -  quarentena / filtragem inbound'
+Head 'MAIL FLOW FORENSICS v3.0  -  quarantine / inbound filtering'
 Say '  Exchange Online' DarkGray
-Say '  Correlacao por MessageId (imune a divergencia P1/P2)' DarkGray
+Say '  Correlation by MessageId (immune to P1/P2 divergence)' DarkGray
 
-#region ------------------------------------------------------ COLETA DE INPUT
+#region ------------------------------------------------------ INPUT COLLECTION
 if (-not $NonInteractive) {
     Say ''
-    Say ' Deixe em BRANCO o que nao souber. Pelo menos um dos dois e obrigatorio.' DarkYellow
+    Say ' Leave BLANK whatever you do not know. At least one of the two is required.' DarkYellow
     Say ''
-    if (-not $Recipient) { $Recipient = Ask 'Email do DESTINATARIO (quem reclamou)' -AllowEmpty }
+    if (-not $Recipient) { $Recipient = Ask 'RECIPIENT email (who complained)' -AllowEmpty }
     if (-not $Sender) {
-        Say '   (aceita "user@dominio.com" ou apenas "@dominio.com")' DarkGray
-        $Sender = Ask 'Email/dominio do REMETENTE' -AllowEmpty
+        Say '   (accepts "user@domain.com" or just "@domain.com")' DarkGray
+        $Sender = Ask 'SENDER email/domain' -AllowEmpty
     }
-    if (-not $Days)   { $Days = [int](Ask 'Janela em dias' -Default '7') }
-    if (-not $Detail) { $Detail = (Ask 'Puxar detalhe de eventos por mensagem? (s/N)' -Default 'N') -match '^[sSyY]' }
+    if (-not $Days)   { $Days = [int](Ask 'Window in days' -Default '7') }
+    if (-not $Detail) { $Detail = (Ask 'Pull per-message event detail? (y/N)' -Default 'N') -match '^[sSyY]' }
 }
 if (-not $Days) { $Days = 7 }
 
 if ($Recipient) { $Recipient = $Recipient.Trim() }
 $Snd = Resolve-SenderInput $Sender
 
-if (-not $Recipient -and -not $Snd) { throw 'Informe pelo menos o destinatario OU o remetente.' }
-if ($Recipient -and -not (Test-EmailAddress $Recipient)) { throw "Destinatario invalido: '$Recipient'" }
-if ($Sender -and -not $Snd) { throw "Remetente invalido: '$Sender'. Use 'user@dominio.com' ou '@dominio.com'." }
+if (-not $Recipient -and -not $Snd) { throw 'Provide at least the recipient OR the sender.' }
+if ($Recipient -and -not (Test-EmailAddress $Recipient)) { throw "Invalid recipient: '$Recipient'" }
+if ($Sender -and -not $Snd) { throw "Invalid sender: '$Sender'. Use 'user@domain.com' or '@domain.com'." }
 
 if ($Snd -and $Snd.Mode -eq 'Address') {
     Say ''
-    Say " [i] Endereco completo informado: $($Snd.Address)" Cyan
-    Say "     O filtro de trace vai operar por DOMINIO (*@$($Snd.Domain)), nao por" DarkGray
-    Say '     endereco. Motivo: trace indexa o envelope (P1), que costuma diferir do' DarkGray
-    Say '     From: do cabecalho (P2). Filtrar por endereco produz falso negativo.' DarkGray
+    Say " [i] Full address provided: $($Snd.Address)" Cyan
+    Say "     The trace filter will work by DOMAIN (*@$($Snd.Domain)), not by" DarkGray
+    Say '     address. Reason: trace indexes the envelope (P1), which often differs from' DarkGray
+    Say '     the header From: (P2). Filtering by address produces a false negative.' DarkGray
 }
 
 $End   = (Get-Date).ToUniversalTime()
@@ -134,38 +157,48 @@ $Stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $Tag   = if ($Snd) { $Snd.Domain } elseif ($Recipient) { ($Recipient -split '@')[0] } else { 'query' }
 $OutDir = Join-Path $OutRoot "$Tag`_$Stamp"
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+# CSV always in the csv subfolder next to the script, even if the script is moved
+# (an explicit -OutRoot still wins). File names get the case prefix so runs do not overwrite each other.
+$__root    = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+$csvDir    = if ($__outRootGiven) { $OutDir } else { Join-Path $__root 'csv' }
+if (-not $__outRootGiven -and (-not (Test-Path $csvDir)) -and (Test-Path (Join-Path (Split-Path $__root) 'csv'))) { $csvDir = Join-Path (Split-Path $__root) 'csv' }   # script in a subfolder: use the csv folder of the parent
+$csvPrefix = if ($__outRootGiven) { '' } else { "$Tag`_$Stamp`_" }
+try { if (-not (Test-Path $csvDir)) { $null = New-Item -ItemType Directory -Path $csvDir -ErrorAction Stop } } catch {}
+try { $__p = Join-Path $csvDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $csvDir = $env:TEMP; Write-Host "WARNING: CSV output redirected to $csvDir" -Foreground Yellow }
 try { Start-Transcript -Path (Join-Path $OutDir 'console.log') -Force | Out-Null } catch {}
 
-Head 'PARAMETROS'
-Say ("  Destinatario : {0}" -f $(if ($Recipient) { $Recipient } else { '(nao informado)' })) White
-Say ("  Remetente    : {0}   [modo {1}]" -f $(if ($Snd) { $Snd.Pattern } else { '(nao informado)' }), $(if ($Snd) { $Snd.Mode } else { 'n/a' })) White
-Say ("  Janela UTC   : {0}  ->  {1}   ({2}d)" -f $Start.ToString('u'), $End.ToString('u'), $Days) White
-Say ("  Saida        : {0}" -f $OutDir) White
+Head 'PARAMETERS'
+Say ("  Recipient    : {0}" -f $(if ($Recipient) { $Recipient } else { '(not specified)' })) White
+Say ("  Sender       : {0}   [mode {1}]" -f $(if ($Snd) { $Snd.Pattern } else { '(not specified)' }), $(if ($Snd) { $Snd.Mode } else { 'n/a' })) White
+Say ("  UTC window   : {0}  ->  {1}   ({2}d)" -f $Start.ToString('u'), $End.ToString('u'), $Days) White
+Say ("  Output       : {0}" -f $OutDir) White
+Say ("  CSV          : {0}" -f $csvDir) White
 #endregion
 
-#region ---------------------------------------------------------- CONEXAO
-Head 'CONEXAO'
+#region ---------------------------------------------------------- CONNECTION
+Head 'CONNECTION'
 if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
-    throw 'Modulo ExchangeOnlineManagement ausente. Install-Module ExchangeOnlineManagement -Scope CurrentUser'
+    throw 'ExchangeOnlineManagement module missing. Install-Module ExchangeOnlineManagement -Scope CurrentUser'
 }
 Import-Module ExchangeOnlineManagement -ErrorAction Stop
 $conn = Get-ConnectionInformation -ErrorAction SilentlyContinue |
         Where-Object { $_.State -eq 'Connected' -and $_.TokenStatus -eq 'Active' }
-if ($conn) { Say "[+] Sessao ativa: $($conn.UserPrincipalName)" Green }
-else       { Say "[*] Conectando como $UPN ..." Yellow
+if ($conn) { Say "[+] Active session: $($conn.UserPrincipalName)" Green }
+else       { Say "[*] Connecting as $UPN ..." Yellow
              Connect-ExchangeOnline -UserPrincipalName $UPN -ShowBanner:$false
-             Say '[+] Conectado.' Green }
+             Say '[+] Connected.' Green }
 #endregion
 
 #region -------------------------------------------------------- PRE-FLIGHT
-Head 'PRE-FLIGHT DE PERMISSAO'
+Head 'PERMISSION PRE-FLIGHT'
 $Can = [ordered]@{ Quarantine=$false; TraceV2=$false; TraceV1=$false; Detail=$false
                    JunkCfg=$false; InboxRule=$false; AllowBlock=$false }
 $Denied = @()
 function Probe {
     param([string]$Name, [scriptblock]$Test)
     try { & $Test | Out-Null; $script:Can[$Name] = $true; Say "  [OK]     $Name" Green }
-    catch { $script:Denied += "$Name -> $($_.Exception.Message)"; Say "  [NEGADO] $Name" Red }
+    catch { $script:Denied += "$Name -> $($_.Exception.Message)"; Say "  [DENIED] $Name" Red }
 }
 Probe 'Quarantine' { Get-QuarantineMessage -PageSize 1 -ErrorAction Stop }
 Probe 'TraceV2'    { Get-MessageTraceV2 -StartDate $Start -EndDate $End -ResultSize 1 -ErrorAction Stop }
@@ -178,16 +211,16 @@ if ($Recipient) {
 Probe 'AllowBlock' { Get-TenantAllowBlockListItems -ListType Sender -ErrorAction Stop }
 
 if (-not $Can.Quarantine -and -not $Can.TraceV2 -and -not $Can.TraceV1) {
-    Say ' Sem acesso a nenhuma fonte primaria. Reative o PIM; se persistir, peca' Red
-    Say ' "Security Reader" ou "Hygiene Management" no Defender.' Yellow
+    Say ' No access to any primary source. Check/re-activate your admin role; if it persists, request' Red
+    Say ' "Security Reader" or "Hygiene Management" in Defender.' Yellow
     $Denied | ForEach-Object { Say "   $_" DarkGray }
     try { Stop-Transcript | Out-Null } catch {}
-    throw 'Abortando.'
+    throw 'Aborting.'
 }
 #endregion
 
-#region ------------------------------------------- FASE 1: QUARENTENA (P2)
-Head 'FASE 1/5  -  QUARENTENA   (fonte do P2 / header From)'
+#region ------------------------------------------- PHASE 1: QUARANTINE (P2)
+Head 'PHASE 1/5  -  QUARANTINE   (source of P2 / header From)'
 $Quar = @()
 if ($Can.Quarantine) {
     $useDomain = (Get-Command Get-QuarantineMessage).Parameters.ContainsKey('Domain')
@@ -195,17 +228,17 @@ if ($Can.Quarantine) {
     do {
         $p = @{ StartReceivedDate=$Start; EndReceivedDate=$End; Direction='Inbound'
                 PageSize=1000; Page=$page; ErrorAction='Stop' }
-        # Sempre por DOMINIO, nunca por endereco: o usuario reporta o P2 e pode
-        # existir mais de um P2 no mesmo dominio (foi o caso: 9 remetentes).
+        # Always by DOMAIN, never by address: the user reports the P2 and there may
+        # be more than one P2 in the same domain (that was the case: 9 senders).
         if ($Snd -and $useDomain) { $p.Domain = $Snd.Domain }
         if ($Recipient)           { $p.RecipientAddress = $Recipient }
         try { $batch = Get-QuarantineMessage @p }
         catch {
-            if ($p.ContainsKey('Domain')) { Say '    [!] -Domain rejeitado; filtrando no cliente.' DarkYellow
+            if ($p.ContainsKey('Domain')) { Say '    [!] -Domain rejected; filtering client-side.' DarkYellow
                                             $useDomain=$false; $page=1; $Quar=@(); continue }
             Say "    [!] $($_.Exception.Message)" Red; break
         }
-        if ($batch) { $Quar += $batch; Say "    pagina $page -> $($batch.Count)" DarkGray }
+        if ($batch) { $Quar += $batch; Say "    page $page -> $($batch.Count)" DarkGray }
         $page++
     } while ($batch -and $batch.Count -eq 1000 -and $page -le 200)
 
@@ -213,14 +246,14 @@ if ($Can.Quarantine) {
 
     $qHeld = @($Quar | Where-Object { $_.ReleaseStatus -ne 'RELEASED' })
     $qRel  = @($Quar | Where-Object { $_.ReleaseStatus -eq 'RELEASED' })
-    Say "[+] $($Quar.Count) em quarentena  |  $($qHeld.Count) ainda retidas  |  $($qRel.Count) ja liberadas" Green
+    Say "[+] $($Quar.Count) in quarantine  |  $($qHeld.Count) still held  |  $($qRel.Count) already released" Green
     if ($qRel.Count) {
-        Say "    [!] $($qRel.Count) liberacao(oes) manual(is) = falsos positivos ja reconhecidos pela propria organizacao." Yellow
+        Say "    [!] $($qRel.Count) manual release(s) = false positives already acknowledged by the org itself." Yellow
     }
-} else { Say '[!] Pulado (sem permissao) - sem isso nao se CONFIRMA quarentena.' Red }
+} else { Say '[!] Skipped (no permission) - without this, quarantine cannot be CONFIRMED.' Red }
 #endregion
 
-#region -------------------------------------- FASE 2: TRACE (por MessageId)
+#region -------------------------------------- PHASE 2: TRACE (by MessageId)
 function Get-Trace {
     param([string]$SenderAddress, [string]$RecipientAddress, [string]$MessageId)
     $out = @(); $chunk = 10; $cursor = $End
@@ -236,61 +269,61 @@ function Get-Trace {
         } catch { Say "    [!] trace $($from.ToString('MM-dd')): $($_.Exception.Message)" Red; break }
         if ($batch) {
             $out += $batch
-            if ($batch.Count -ge 5000) { Say '    [!] bloco saturado (5000). Reduza -Days.' Yellow }
+            if ($batch.Count -ge 5000) { Say '    [!] chunk saturated (5000). Reduce -Days.' Yellow }
         }
         $cursor = $from
     }
     return $out
 }
 
-Head 'FASE 2/5  -  MESSAGE TRACE   (fonte do P1 / envelope sender)'
+Head 'PHASE 2/5  -  MESSAGE TRACE   (source of P1 / envelope sender)'
 $Trace = @()
 if ($Can.TraceV2 -or $Can.TraceV1) {
 
-    # (a) ANCORA: MessageId vindo da quarentena. Imune a P1 != P2.
+    # (a) ANCHOR: MessageId taken from quarantine. Immune to P1 != P2.
     $traceCmd = if ($Can.TraceV2) { 'Get-MessageTraceV2' } else { 'Get-MessageTrace' }
     $canById  = (Get-Command $traceCmd).Parameters.ContainsKey('MessageId')
     if (-not $canById) {
-        Say "[!] $traceCmd nao expoe -MessageId nesta versao do modulo." DarkYellow
-        Say '    A ancora por MessageId sera pulada; a correlacao vai depender da' DarkYellow
-        Say '    varredura por destinatario. Informe -Recipient para nao ficar cego.' DarkYellow
+        Say "[!] $traceCmd does not expose -MessageId in this module version." DarkYellow
+        Say '    The MessageId anchor will be skipped; correlation will depend on the' DarkYellow
+        Say '    recipient sweep. Provide -Recipient so you are not flying blind.' DarkYellow
     }
 
     $ids = @($Quar | ForEach-Object { $_.MessageId } | Where-Object { $_ } | Sort-Object -Unique)
     if ($canById -and $ids.Count) {
-        Say "[*] Ancorando por MessageId: $($ids.Count) id(s) unico(s) da quarentena" Yellow
+        Say "[*] Anchoring by MessageId: $($ids.Count) unique id(s) from quarantine" Yellow
         $i = 0
         foreach ($id in ($ids | Select-Object -First 300)) {
-            $i++; Write-Progress -Activity 'Trace por MessageId' -Status "$i/$($ids.Count)" -PercentComplete (100*$i/$ids.Count)
+            $i++; Write-Progress -Activity 'Trace by MessageId' -Status "$i/$($ids.Count)" -PercentComplete (100*$i/$ids.Count)
             $Trace += Get-Trace -MessageId $id
         }
-        Write-Progress -Activity 'Trace por MessageId' -Completed
-        Say "    -> $($Trace.Count) linha(s)" DarkGray
+        Write-Progress -Activity 'Trace by MessageId' -Completed
+        Say "    -> $($Trace.Count) row(s)" DarkGray
     }
 
-    # (b) VARREDURA: caixa do reclamante, filtrada por DOMINIO (nunca por endereco).
+    # (b) SWEEP: complainant's mailbox, filtered by DOMAIN (never by address).
     if ($Recipient) {
-        Say "[*] Varrendo a caixa $Recipient (filtro por dominio no cliente)" Yellow
+        Say "[*] Sweeping mailbox $Recipient (client-side domain filter)" Yellow
         $all = Get-Trace -RecipientAddress $Recipient
-        Say "    $($all.Count) mensagem(ns) totais na janela" DarkGray
+        Say "    $($all.Count) total message(s) in the window" DarkGray
         $Trace += if ($Snd) { $all | Where-Object { $_.SenderAddress -like $Snd.Pattern } } else { $all }
     }
 
-    # (c) COMPLEMENTO: remetentes P1 ja observados, para pegar outros destinatarios.
+    # (c) COMPLEMENT: P1 senders already observed, to catch other recipients.
     $p1s = @($Trace | Select-Object -ExpandProperty SenderAddress -Unique | Where-Object { $_ })
     foreach ($s in $p1s) {
         if ($Snd -and $s -notlike $Snd.Pattern) { continue }
-        Say "[*] Ampliando por remetente P1: $s" Yellow
+        Say "[*] Expanding by P1 sender: $s" Yellow
         $Trace += Get-Trace -SenderAddress $s
     }
 
     $Trace = @($Trace | Sort-Object MessageId, RecipientAddress, Received -Unique)
-    Say "[+] $($Trace.Count) evento(s) unico(s)." Green
-} else { Say '[!] Pulado (sem permissao).' Red }
+    Say "[+] $($Trace.Count) unique event(s)." Green
+} else { Say '[!] Skipped (no permission).' Red }
 #endregion
 
-#region ------------------------------------- FASE 3: CORRELACAO E DIVERGENCIA
-Head 'FASE 3/5  -  CORRELACAO P1 x P2'
+#region ------------------------------------- PHASE 3: CORRELATION AND DIVERGENCE
+Head 'PHASE 3/5  -  P1 x P2 CORRELATION'
 
 $qIndex = @{}
 foreach ($q in $Quar) { $qIndex["$(Norm-MsgId $q.MessageId)|$($q.RecipientAddress.ToLower())"] = $q }
@@ -323,7 +356,7 @@ $Corr = foreach ($t in $Trace) {
 }
 $Corr = @($Corr)
 
-# Quarentena sem linha correspondente no trace (permissao ou janela)
+# Quarantine items with no matching trace row (permission or window)
 $traceKeys = @{}; foreach ($t in $Trace) { $traceKeys["$(Norm-MsgId $t.MessageId)|$($t.RecipientAddress.ToLower())"] = $true }
 $Orphans = @($Quar | Where-Object { -not $traceKeys["$(Norm-MsgId $_.MessageId)|$($_.RecipientAddress.ToLower())"] })
 
@@ -335,36 +368,36 @@ $PairMap = $Diverg | Group-Object HeaderSender_P2, EnvelopeSender_P1 | ForEach-O
 }
 
 if ($Diverg.Count) {
-    Say "[!!] DIVERGENCIA P1/P2 em $($Diverg.Count) mensagem(ns):" Red
+    Say "[!!] P1/P2 DIVERGENCE in $($Diverg.Count) message(s):" Red
     $PairMap | ForEach-Object { Say ("     header {0}  ->  envelope {1}   ({2} msg)" -f $_.HeaderSender_P2, $_.EnvelopeSender_P1, $_.Messages) DarkYellow }
-    Say '     Consequencia: allow-list por ENDERECO pode nao funcionar - o filtro' Yellow
-    Say '     avalia o envelope. Pedir allow no nivel de DOMINIO.' Yellow
-} else { Say '[+] Sem divergencia P1/P2 nas mensagens correlacionadas.' Green }
+    Say '     Consequence: an ADDRESS-level allow-list may not work - the filter' Yellow
+    Say '     evaluates the envelope. Request the allow at DOMAIN level.' Yellow
+} else { Say '[+] No P1/P2 divergence in the correlated messages.' Green }
 
-if ($Orphans.Count) { Say "[!] $($Orphans.Count) item(ns) de quarentena sem linha no trace (ver orphans.csv)." DarkYellow }
+if ($Orphans.Count) { Say "[!] $($Orphans.Count) quarantine item(s) with no trace row (see orphans.csv)." DarkYellow }
 #endregion
 
-#region ------------------------------------------------------ FASE 4: DETALHE
-Head 'FASE 4/5  -  DETALHE DE EVENTOS'
+#region ------------------------------------------------------ PHASE 4: DETAIL
+Head 'PHASE 4/5  -  EVENT DETAIL'
 $Details = @()
 if ($Detail -and $Can.Detail -and $Trace.Count) {
-    $alvos = @($Corr | Where-Object { $_.EffectiveDisposition -notmatch '^Delivered$' } | Select-Object -First 25)
-    if (-not $alvos) { $alvos = @($Corr | Select-Object -First 10) }
-    Say "[*] Detalhando $($alvos.Count) mensagem(ns)..." Yellow
-    foreach ($m in $alvos) {
+    $targets = @($Corr | Where-Object { $_.EffectiveDisposition -notmatch '^Delivered$' } | Select-Object -First 25)
+    if (-not $targets) { $targets = @($Corr | Select-Object -First 10) }
+    Say "[*] Detailing $($targets.Count) message(s)..." Yellow
+    foreach ($m in $targets) {
         try {
-            $Details += Get-MessageTraceDetailV2 -MessageTraceId $m.MessageTraceId -RecipientAddress $m.Recipient -ErrorAction Stop |
+            $Details += Get-MessageTraceDetailV2 -MessageTraceId $m.MessageTraceId -RecipientAddress $m.Recipient -StartDate $Start -EndDate $End -ErrorAction Stop |
                 Select-Object @{n='MessageId';e={$m.MessageId}}, @{n='Sender';e={$m.EnvelopeSender_P1}},
                               @{n='Recipient';e={$m.Recipient}}, Date, Event, Action, Detail
         } catch { Say "    [!] $($m.MessageId): $($_.Exception.Message)" DarkGray }
     }
-    Say "[+] $($Details.Count) evento(s)." Green
-} elseif ($Detail) { Say '[!] Indisponivel.' DarkYellow } else { Say '[-] Nao solicitado (-Detail).' DarkGray }
+    Say "[+] $($Details.Count) event(s)." Green
+} elseif ($Detail) { Say '[!] Unavailable.' DarkYellow } else { Say '[-] Not requested (-Detail).' DarkGray }
 #endregion
 
-#region -------------------------------------- FASE 5: USUARIO E TENANT
-Head 'FASE 5/5  -  LADO DO USUARIO E TENANT'
-$JunkCfg=$null; $Rules=@(); $AllowBlock=@(); $blocked=@(); $trusted=@(); $suspeitas=@()
+#region -------------------------------------- PHASE 5: USER AND TENANT
+Head 'PHASE 5/5  -  USER AND TENANT SIDE'
+$JunkCfg=$null; $Rules=@(); $AllowBlock=@(); $blocked=@(); $trusted=@(); $suspectRules=@()
 
 if ($Can.JunkCfg) {
     $JunkCfg = Get-MailboxJunkEmailConfiguration -Identity $Recipient
@@ -372,32 +405,33 @@ if ($Can.JunkCfg) {
     $trusted = @($JunkCfg.TrustedSendersAndDomains | Where-Object { -not $Snd -or $_ -like "*$($Snd.Domain)*" })
     Say "  Junk filter ..........: $($JunkCfg.Enabled)" White
     Say "  Blocked senders ......: $($JunkCfg.BlockedSendersAndDomains.Count)" White
-    if ($blocked) { Say "  [!!] REMETENTE NA BLOCKED LIST DO USUARIO: $($blocked -join ', ')" Red }
-    if ($trusted) { Say "  [+]  Ja consta como confiavel: $($trusted -join ', ')" Green }
+    if ($blocked) { Say "  [!!] SENDER ON THE USER'S BLOCKED LIST: $($blocked -join ', ')" Red }
+    if ($trusted) { Say "  [+]  Already listed as trusted: $($trusted -join ', ')" Green }
 }
 if ($Can.InboxRule) {
     $Rules = @(Get-InboxRule -Mailbox $Recipient | Where-Object { $_.Enabled })
-    $suspeitas = @($Rules | Where-Object {
+    $suspectRules = @($Rules | Where-Object {
         $t = ($_.Description + $_.From + $_.SubjectContainsWords + $_.FromAddressContainsWords) -join ' '
         (-not $Snd -or $t -like "*$($Snd.Domain)*") -and ($_.DeleteMessage -or $_.MoveToFolder -or $_.MarkAsRead)
     })
-    Say "  Inbox rules ativas ...: $($Rules.Count)" White
-    if ($suspeitas) { Say '  [!!] REGRA PODE ESTAR DESVIANDO:' Red
-                      $suspeitas | ForEach-Object { Say "       - $($_.Name)" DarkYellow } }
+    Say "  Enabled inbox rules ..: $($Rules.Count)" White
+    if ($suspectRules) { Say '  [!!] A RULE MAY BE DIVERTING MAIL:' Red
+                      $suspectRules | ForEach-Object { Say "       - $($_.Name)" DarkYellow } }
 }
 if ($Can.AllowBlock -and $Snd) {
     foreach ($lt in 'Sender','Url') {
         try { $AllowBlock += Get-TenantAllowBlockListItems -ListType $lt -ErrorAction Stop |
                              Where-Object { $_.Value -like "*$($Snd.Domain)*" } } catch {}
     }
-    if ($AllowBlock) { Say '  [!] Entrada existente na Tenant Allow/Block List:' Yellow
+    if ($AllowBlock) { Say '  [!] Existing entry in the Tenant Allow/Block List:' Yellow
                        $AllowBlock | ForEach-Object { Say "       $($_.Value)  Action=$($_.Action)  Exp=$($_.ExpirationDate)" DarkYellow } }
-    else             { Say '  Tenant Allow/Block ...: nenhuma entrada para o dominio' White }
+    else             { Say '  Tenant Allow/Block ...: no entry for the domain' White }
 }
 #endregion
 
-#region ---------------------------------------------------------- VEREDITO
-Head 'VEREDITO'
+#region ---------------------------------------------------------- VERDICT
+$TenantName = try { (Get-AcceptedDomain -ErrorAction Stop | Where-Object Default).DomainName } catch { '(unknown)' }
+Head 'VERDICT'
 $nQuar = $Quar.Count
 $nHeld = @($Quar | Where-Object { $_.ReleaseStatus -ne 'RELEASED' }).Count
 $nRel  = @($Quar | Where-Object { $_.ReleaseStatus -eq 'RELEASED' }).Count
@@ -409,23 +443,23 @@ $fpRate = if ($nQuar) { [math]::Round(100*$nRel/$nQuar) } else { 0 }
 $Verdict, $Action =
     if ($nQuar -gt 0) {
         "CONFIRMED - SERVER-SIDE QUARANTINE. $nQuar message(s); $nHeld still held, $nRel manually released ($fpRate% false-positive rate).",
-        $(if ($Diverg.Count) { 'Escalate to Cyber. Request DOMAIN-level allow (envelope sender differs from header sender - address-level allow may not match).' }
-          else               { 'Escalate to Cyber with quarantine.csv + correlated.csv as evidence.' })
+        $(if ($Diverg.Count) { 'Escalate to the security team. Request DOMAIN-level allow (envelope sender differs from header sender - address-level allow may not match).' }
+          else               { 'Escalate to the security team with quarantine.csv + correlated.csv as evidence.' })
     }
-    elseif ($nFail -gt 0)  { "CONFIRMED - TRANSPORT FAILURE. $nFail message(s) failed.", 'Nao e quarentena: investigar connector / edge / DBEB antes do Cyber.' }
-    elseif ($nJunk -gt 0)  { "CONFIRMED - JUNK FOLDER. $nJunk message(s) FilteredAsSpam.", 'Entregue na pasta Lixo, nao retido. Fix e anti-spam policy, nao release.' }
-    elseif ($blocked)      { 'NOT CONFIRMED - USER BLOCKED SENDER LIST.', 'Causa do proprio usuario. Remover da Blocked Senders. Nao acionar Cyber.' }
-    elseif ($suspeitas)    { 'NOT CONFIRMED - INBOX RULE.', 'Regra do Outlook do usuario. Corrigir com ele.' }
-    elseif ($nClean -gt 0) { "NOT CONFIRMED - DELIVERED. $nClean message(s) entregues.", 'Mail flow limpo. Verificar pasta / Focused Inbox / sync do cliente.' }
-    elseif ($Trace.Count -eq 0) { 'NO DATA - nada desse remetente alcancou o tenant na janela.', 'Confirmar o dominio, ampliar -Days, ou suspeitar de bloqueio pre-trace.' }
-    else                   { 'INCONCLUSIVE.', 'Rodar com -Detail para ver a cadeia de eventos.' }
+    elseif ($nFail -gt 0)  { "CONFIRMED - TRANSPORT FAILURE. $nFail message(s) failed.", 'Not quarantine: investigate connector / edge / DBEB before escalating to security.' }
+    elseif ($nJunk -gt 0)  { "CONFIRMED - JUNK FOLDER. $nJunk message(s) FilteredAsSpam.", 'Delivered to the Junk folder, not held. The fix is anti-spam policy, not release.' }
+    elseif ($blocked)      { 'NOT CONFIRMED - USER BLOCKED SENDER LIST.', 'Caused by the user. Remove from Blocked Senders. No security escalation needed.' }
+    elseif ($suspectRules)    { 'NOT CONFIRMED - INBOX RULE.', 'Outlook rule set by the user. Fix it together with the user.' }
+    elseif ($nClean -gt 0) { "NOT CONFIRMED - DELIVERED. $nClean message(s) delivered.", 'Mail flow is clean. Check folder / Focused Inbox / client sync.' }
+    elseif ($Trace.Count -eq 0) { 'NO DATA - nothing from this sender reached the tenant in the window.', 'Confirm the domain, widen -Days, or suspect a pre-trace block.' }
+    else                   { 'INCONCLUSIVE.', 'Run with -Detail to see the event chain.' }
 
-$cor = if ($Verdict -like 'CONFIRMED*') { 'Red' } elseif ($Verdict -like 'NOT*') { 'Yellow' } else { 'DarkYellow' }
-Say ''; Say "  $Verdict" $cor; Say ''; Say "  ACAO: $Action" Cyan; Say ''
+$color = if ($Verdict -like 'CONFIRMED*') { 'Red' } elseif ($Verdict -like 'NOT*') { 'Yellow' } else { 'DarkYellow' }
+Say ''; Say "  $Verdict" $color; Say ''; Say "  ACTION: $Action" Cyan; Say ''
 Say '  ----------------------------------------------------------------' DarkGray
-Say ("  Quarentena total .....: {0}   (retidas {1} / liberadas {2})" -f $nQuar,$nHeld,$nRel) White
-Say ("  Trace correlacionado .: {0}" -f $Corr.Count) White
-Say ("  Divergencia P1/P2 ....: {0}" -f $Diverg.Count) White
+Say ("  Total quarantine .....: {0}   (held {1} / released {2})" -f $nQuar,$nHeld,$nRel) White
+Say ("  Correlated trace .....: {0}" -f $Corr.Count) White
+Say ("  P1/P2 divergence .....: {0}" -f $Diverg.Count) White
 $Corr | Group-Object EffectiveDisposition | Sort-Object Count -Descending |
     ForEach-Object { Say ("      {0,-38} {1}" -f $_.Name, $_.Count) DarkGray }
 #endregion
@@ -434,9 +468,9 @@ $Corr | Group-Object EffectiveDisposition | Sort-Object Count -Descending |
 Head 'EXPORT'
 function Dump { param($data,$file,$sel)
     if ($data -and $data.Count) {
-        if ($sel) { $data | Select-Object $sel | Export-Csv (Join-Path $OutDir $file) -NoTypeInformation -Encoding UTF8 }
-        else      { $data | Export-Csv (Join-Path $OutDir $file) -NoTypeInformation -Encoding UTF8 }
-        Say "  [+] $file  ($($data.Count))" Green
+        if ($sel) { $data | Select-Object $sel | Export-Csv (Join-Path $csvDir ($csvPrefix + $file)) -NoTypeInformation -Encoding UTF8 }
+        else      { $data | Export-Csv (Join-Path $csvDir ($csvPrefix + $file)) -NoTypeInformation -Encoding UTF8 }
+        Say "  [+] $csvPrefix$file  ($($data.Count))" Green
     }
 }
 Dump $Corr 'correlated.csv'
@@ -452,7 +486,7 @@ $sb = [System.Text.StringBuilder]::new(); $n = { param($t) [void]$sb.AppendLine(
 & $n "Recipient .......: $(if ($Recipient) { $Recipient } else { '(not specified)' })"
 & $n "Sender ..........: $(if ($Snd) { $Snd.Pattern } else { '(not specified)' })"
 & $n "Window (UTC) ....: $($Start.ToString('u'))  ->  $($End.ToString('u'))   ($Days days)"
-& $n "Tenant ..........: $((Get-AcceptedDomain | Where-Object Default).DomainName)"
+& $n "Tenant ..........: $TenantName"
 & $n "Collected by ....: $UPN"
 & $n "Collected at ....: $((Get-Date).ToUniversalTime().ToString('u')) UTC"
 & $n ''; & $n "VERDICT: $Verdict"; & $n "ACTION : $Action"; & $n ''
@@ -490,7 +524,7 @@ if ($JunkCfg) {
     if ($trusted) { & $n "  >> Sender on user's trusted list: $($trusted -join ', ')" }
 } else { & $n '  (not collected)' }
 if ($Rules)     { & $n "  Enabled inbox rules ..: $($Rules.Count)" }
-if ($suspeitas) { $suspeitas | ForEach-Object { & $n "  >> SUSPECT RULE: $($_.Name)" } }
+if ($suspectRules) { $suspectRules | ForEach-Object { & $n "  >> SUSPECT RULE: $($_.Name)" } }
 & $n ''
 & $n 'TENANT ALLOW/BLOCK LIST'; & $n '-----------------------'
 if ($AllowBlock) { $AllowBlock | ForEach-Object { & $n "  $($_.Value)  Action=$($_.Action)  Expires=$($_.ExpirationDate)" } }
@@ -512,11 +546,11 @@ if ($Denied) {
 $sb.ToString() | Set-Content (Join-Path $OutDir 'SUMMARY.txt') -Encoding UTF8
 Say '  [+] SUMMARY.txt' Green
 
-#region ------------------------------------------------------- JIRA.TXT
-Head 'TICKET (jira.txt)'
+#region ------------------------------------------------------ TICKET.TXT
+Head 'TICKET NOTES (ticket.txt)'
 
 $isServerSide = $Verdict -like 'CONFIRMED*'
-$isUserSide   = ($blocked -and $blocked.Count) -or ($suspeitas -and $suspeitas.Count)
+$isUserSide   = ($blocked -and $blocked.Count) -or ($suspectRules -and $suspectRules.Count)
 
 $who = if ($Recipient) {
            $lp = ($Recipient -split '@')[0]
@@ -548,7 +582,7 @@ $i = [System.Text.StringBuilder]::new(); $w = { param($t) [void]$i.AppendLine($t
 
 & $w "$dom - inbound mail flow review"
 & $w ''
-& $w "Findings from a $Days-day review ($winTxt), tenant $((Get-AcceptedDomain | Where-Object Default).DomainName):"
+& $w "Findings from a $Days-day review ($winTxt), tenant ${TenantName}:"
 & $w ''
 if ($nQuar -gt 0) {
     & $w "- $nQuar inbound message(s) from $dom quarantined."
@@ -567,7 +601,7 @@ if ($nFail -gt 0)  { & $w "- $nFail message(s) failed at transport." }
 if ($nClean -gt 0) { & $w "- $nClean message(s) delivered normally." }
 if ($nQuar -eq 0 -and $Trace.Count -eq 0) { & $w "- No inbound mail from $dom reached the tenant in the window." }
 if ($blocked)   { & $w "- Sender is present on the recipient's own Blocked Senders list: $($blocked -join ', ')." }
-if ($suspeitas) { & $w "- Recipient has an enabled inbox rule matching this sender: $(($suspeitas | ForEach-Object { $_.Name }) -join ', ')." }
+if ($suspectRules) { & $w "- Recipient has an enabled inbox rule matching this sender: $(($suspectRules | ForEach-Object { $_.Name }) -join ', ')." }
 if ($AllowBlock) { & $w "- Existing Tenant Allow/Block entry: $(($AllowBlock | ForEach-Object { "$($_.Value) [$($_.Action)]" }) -join ', ')." }
 
 if ($PairMap) {
@@ -586,7 +620,7 @@ if ($PairMap) {
 & $w "Attachments: $($files -join ', ')."
 & $w 'Method: Get-QuarantineMessage + Get-MessageTrace, correlated by Message-ID.'
 & $w 'Timestamps UTC.'
-if ($isServerSide -and -not $isUserSide) { & $w ''; & $w 'Handing over to Cyber for assessment.' }
+if ($isServerSide -and -not $isUserSide) { & $w ''; & $w 'Handing over to the security team for assessment.' }
 
 # ---------------------------------------------------------------- CUSTOMER
 $c = [System.Text.StringBuilder]::new(); $v = { param($t) [void]$c.AppendLine($t) }
@@ -614,7 +648,7 @@ if ($nQuar -gt 0) {
     }
     & $v ''
     & $v 'Releasing individual messages only fixes them one at a time, so I have'
-    & $v 'passed the full findings to our Cyber Security team, who own the mail'
+    & $v 'passed the full findings to our security team, who own the mail'
     & $v 'filtering policy. Any permanent change to how this sender is treated'
     & $v 'will come from them.'
 }
@@ -623,7 +657,7 @@ elseif ($nJunk -gt 0) {
     & $v 'them as spam and filed them into your Junk Email folder. They are not'
     & $v 'blocked - please check that folder.'
     & $v ''
-    & $v 'I have passed the findings to our Cyber Security team, who own the mail'
+    & $v 'I have passed the findings to our security team, who own the mail'
     & $v 'filtering policy, so this can be looked at properly.'
 }
 elseif ($nFail -gt 0) {
@@ -631,7 +665,7 @@ elseif ($nFail -gt 0) {
     & $v 'never reached the mailbox. This is a delivery failure rather than a spam'
     & $v 'classification.'
     & $v ''
-    & $v 'I have passed the findings to our Cyber Security team for assessment.'
+    & $v 'I have passed the findings to our security team for assessment.'
 }
 elseif ($blocked) {
     & $v "The messages are not being blocked by our mail filter. $dom is on the"
@@ -641,7 +675,7 @@ elseif ($blocked) {
     & $v 'This one is fixable directly on your account - let me know and I can'
     & $v 'remove that entry for you. No security escalation is needed.'
 }
-elseif ($suspeitas) {
+elseif ($suspectRules) {
     & $v 'The messages are not being blocked by our mail filter. There is a rule in'
     & $v 'your Outlook that matches this sender and is moving the messages.'
     & $v ''
@@ -672,15 +706,15 @@ $j = [System.Text.StringBuilder]::new()
 [void]$j.Append($i.ToString()); [void]$j.AppendLine('')
 [void]$j.AppendLine('=============== CUSTOMER COMMENT ==============='); [void]$j.AppendLine('')
 [void]$j.Append($c.ToString())
-$j.ToString() | Set-Content (Join-Path $OutDir 'jira.txt') -Encoding UTF8
-Say '  [+] jira.txt   (internal + customer, ready to paste)' Green
+$j.ToString() | Set-Content (Join-Path $OutDir 'ticket.txt') -Encoding UTF8
+Say '  [+] ticket.txt   (internal + customer, ready to paste)' Green
 Say ''
 Write-Host $j.ToString() -ForegroundColor White
 #endregion
 
 try { Stop-Transcript | Out-Null } catch {}
-Head 'FIM'
-Say "  Evidencia em: $OutDir" Cyan; Say ''
+Head 'DONE'
+Say "  Evidence in: $OutDir" Cyan; Say "  CSV in     : $csvDir" Cyan; Say ''
 if (-not $NonInteractive) {
-    if ((Ask 'Abrir a pasta? (S/n)' -Default 'S') -match '^[sSyY]') { Start-Process explorer.exe $OutDir }
+    if ((Ask 'Open the folder? (Y/n)' -Default 'Y') -match '^[sSyY]') { Start-Process explorer.exe $OutDir }
 }

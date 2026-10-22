@@ -1,46 +1,47 @@
 ﻿<#
 .SYNOPSIS
-    Script pai interativo: audita e (opcionalmente) habilita Auto-Expanding
-    Archive em mailboxes do Exchange Online.
+    Interactive parent script: audits and (optionally) enables Auto-Expanding
+    Archive on Exchange Online mailboxes.
 
 .DESCRIPTION
-    Roda sem argumento nenhum. Ele pergunta o email, verifica tudo e decide:
+    Runs with no arguments at all. It asks for the email, checks everything and decides:
 
-      [A] JA HABILITADO          -> reporta e encerra. Nada a fazer.
-      [B] SEM LICENCA            -> avisa e encerra. Habilitar nao resolveria.
-      [C] DESABILITADO + LICENCA -> oferece habilitar (S/N).
-                                    Se SIM: executa, espera 30s com contador,
-                                    reconsulta e mostra a prova.
-      [D] SEM ARCHIVE            -> avisa e entrega o comando pra provisionar.
+      [A] ALREADY ENABLED        -> reports and exits. Nothing to do.
+      [B] NO LICENSE             -> warns and exits. Enabling would not help.
+      [C] DISABLED + LICENSED    -> offers to enable (Y/N).
+                                    If YES: runs it, waits 30s with a countdown,
+                                    re-queries and shows the proof.
+      [D] NO ARCHIVE             -> warns and gives you the command to provision it.
 
-    Ao terminar, pergunta se quer processar outra mailbox. Loop ate voce sair.
+    When done, asks whether to process another mailbox. Loops until you exit.
 
-    A licenca e inferida pela ArchiveQuota (>= 90 GB = E3/E5 ou add-on EOA),
-    porque o Microsoft Graph PowerShell esta bloqueado por Conditional Access
-    nesta maquina e nao da pra consultar o SKU direto.
+    The license is inferred from ArchiveQuota (>= 90 GB = E3/E5 or EOA add-on),
+    so the script works with an Exchange Online session only (no Microsoft Graph
+    connection or license-read permission needed).
 
 .PARAMETER User
-    Opcional. Pula a primeira pergunta e ja processa este email.
+    Optional. Skips the first prompt and processes this email right away.
 
 .PARAMETER Admin
-    UPN admin usado no Connect-ExchangeOnline.
+    Admin UPN used for Connect-ExchangeOnline.
 
 .PARAMETER Force
-    Pula a confirmacao S/N. Use com juizo.
+    Skips the Y/N confirmation. Use with care.
 
 .EXAMPLE
-    .\Manage-ArchiveAutoExpand.ps1
+    .\Manage-ArchiveAutoExpand.ps1 -Admin ADMIN@DOMAIN.COM
 
 .EXAMPLE
-    .\Manage-ArchiveAutoExpand.ps1 -User user@contoso.com
+    .\Manage-ArchiveAutoExpand.ps1 -Admin ADMIN@DOMAIN.COM -User user@domain.com
 
 .NOTES
-    PIM OBRIGATORIO: Entra -> Identity Governance -> PIM -> My roles ->
-    Microsoft Entra roles -> Activate -> "Exchange Recipient Administrator".
-    Sem PIM ativo o Get-Mailbox mente: retorna "object couldn't be found"
-    em vez de "access denied".
+    ROLE REQUIRED: "Exchange Recipient Administrator" (or Exchange Administrator).
+    If you use PIM: Entra -> Identity Governance -> PIM -> My roles ->
+    Microsoft Entra roles -> Activate.
+    Without an active role Get-Mailbox misleads: it returns "object couldn't be found"
+    instead of "access denied".
 
-    Enable-Mailbox -AutoExpandingArchive e IRREVERSIVEL.
+    Enable-Mailbox -AutoExpandingArchive is IRREVERSIBLE.
 #>
 
 [CmdletBinding()]
@@ -79,10 +80,10 @@ function ConvertTo-Gb {
 }
 
 function Start-Countdown {
-    param([int] $Seconds = 30, [string] $Activity = 'Aguardando propagacao do EXO')
+    param([int] $Seconds = 30, [string] $Activity = 'Waiting for EXO propagation')
     for ($i = $Seconds; $i -gt 0; $i--) {
         $pct = (($Seconds - $i) / $Seconds) * 100
-        Write-Progress -Activity $Activity -Status "$i segundos restantes..." -PercentComplete $pct
+        Write-Progress -Activity $Activity -Status "$i seconds remaining..." -PercentComplete $pct
         Start-Sleep -Seconds 1
     }
     Write-Progress -Activity $Activity -Completed
@@ -91,10 +92,10 @@ function Start-Countdown {
 function Read-YesNo {
     param([string] $Prompt)
     while ($true) {
-        $a = (Read-Host "$Prompt [S/N]").Trim().ToUpper()
-        if ($a -in @('S','SIM','Y','YES')) { return $true  }
-        if ($a -in @('N','NAO','NÃO','NO')) { return $false }
-        Write-Warn2 "Responde S ou N, primata."
+        $a = (Read-Host "$Prompt [Y/N]").Trim().ToUpper()
+        if ($a -in @('Y','YES','S','SIM')) { return $true  }   # S/SIM/NAO kept for backward compatibility
+        if ($a -in @('N','NO','NAO')) { return $false }
+        Write-Warn2 "Please answer Y or N."
     }
 }
 
@@ -103,43 +104,43 @@ function Resolve-TargetMailbox {
     try {
         return Get-Mailbox -Identity $Id -ErrorAction Stop
     } catch {
-        Write-Warn2 "Get-Mailbox falhou para '$Id'. Tentando Get-Recipient..."
+        Write-Warn2 "Get-Mailbox failed for '$Id'. Trying Get-Recipient..."
     }
     $local = ($Id -split '@')[0]
     $rcpt  = @(Get-Recipient -Filter "EmailAddresses -like '*$local*'" -ErrorAction SilentlyContinue)
 
     if ($rcpt.Count -eq 0) {
-        throw "Nenhum recipient encontrado para '$Id'. Confere o PIM e o endereco."
+        throw "No recipient found for '$Id'. Check your admin role (PIM) and the address."
     }
     if ($rcpt.Count -gt 1) {
-        Write-Warn2 "Multiplos recipients casaram com '$local':"
+        Write-Warn2 "Multiple recipients matched '$local':"
         $rcpt | Select-Object Name, PrimarySmtpAddress, RecipientType | Format-Table -AutoSize | Out-Host
-        throw "Ambiguo. Rode de novo com o PrimarySmtpAddress exato."
+        throw "Ambiguous. Run again with the exact PrimarySmtpAddress."
     }
-    Write-Ok "Resolvido via Get-Recipient -> Name = $($rcpt[0].Name)"
+    Write-Ok "Resolved via Get-Recipient -> Name = $($rcpt[0].Name)"
     return Get-Mailbox -Identity $rcpt[0].Name -ErrorAction Stop
 }
 
-# =============================================================== conexao ====
+# ============================================================ connection ====
 function Connect-IfNeeded {
     try   { $conn = Get-ConnectionInformation -ErrorAction SilentlyContinue }
     catch { $conn = $null }
 
     if (-not $conn -or $conn.State -ne 'Connected') {
-        Write-Step "Sem sessao EXO ativa. Conectando como $Admin ..."
-        Write-Warn2 "PIM 'Exchange Recipient Administrator' precisa estar ATIVO agora."
+        Write-Step "No active EXO session. Connecting as $Admin ..."
+        Write-Warn2 "The 'Exchange Recipient Administrator' role must be ACTIVE now (PIM, if used)."
         Connect-ExchangeOnline -UserPrincipalName $Admin -ShowBanner:$false
-        Write-Ok "Conectado."
+        Write-Ok "Connected."
     } else {
-        Write-Ok "Sessao EXO ja ativa como $($conn.UserPrincipalName)."
+        Write-Ok "EXO session already active as $($conn.UserPrincipalName)."
     }
 }
 
-# ========================================================= nucleo por user ==
+# ======================================================== per-user core ====
 function Invoke-ArchiveCheck {
     param([string] $Target)
 
-    Write-Banner "AUDITANDO: $Target"
+    Write-Banner "AUDITING: $Target"
 
     try {
         $mbx = Resolve-TargetMailbox -Id $Target
@@ -148,8 +149,8 @@ function Invoke-ArchiveCheck {
         return
     }
 
-    # ArchiveStatus MENTE para mailbox cloud (heranca on-prem).
-    # A verdade e ArchiveState + ArchiveGuid.
+    # ArchiveStatus LIES for cloud mailboxes (on-prem legacy).
+    # The truth is ArchiveState + ArchiveGuid.
     $hasArchive = ($mbx.ArchiveGuid -ne [guid]::Empty) -and ($mbx.ArchiveState -ne 'None')
     $quotaGb    = ConvertTo-Gb $mbx.ArchiveQuota
     $warnGb     = ConvertTo-Gb $mbx.ArchiveWarningQuota
@@ -170,7 +171,7 @@ function Invoke-ArchiveCheck {
 
     $licensed = ($quotaGb -eq 'Unlimited') -or (($quotaGb -is [double]) -and ($quotaGb -ge 90))
 
-    # ---------------------------------------------------------- painel ----
+    # ----------------------------------------------------------- panel ----
     Write-Host ''
     [pscustomobject]@{
         DisplayName                 = $mbx.DisplayName
@@ -190,110 +191,109 @@ function Invoke-ArchiveCheck {
         InPlaceHolds                = ($mbx.InPlaceHolds -join ', ')
     } | Format-List
 
-    # ------------------------------------------------------- cenario [A] --
+    # ------------------------------------------------------ scenario [A] --
     if ($mbx.AutoExpandingArchiveEnabled -eq $true) {
-        Write-Banner "JA ESTA HABILITADO. Parabens, era isso." 'Green'
-        Write-Ok "Auto-Expanding Archive = True. Nao ha nada a fazer."
+        Write-Banner "ALREADY ENABLED" 'Green'
+        Write-Ok "Auto-Expanding Archive = True. Nothing to do."
         Write-Host ''
-        Write-Host " O archive cresce automaticamente ate 1.5 TB."
-        if ($pct) { Write-Host " Consumo atual: $usedGb GB ($pct% da quota base de $quotaGb GB)." }
+        Write-Host " The archive grows automatically up to 1.5 TB."
+        if ($pct) { Write-Host " Current usage: $usedGb GB ($pct% of the $quotaGb GB base quota)." }
         Write-Host ''
-        Write-Host " Se mesmo assim o usuario reclama de archive cheio:"
-        Write-Host "   - o provisionamento da area auxiliar leva ate 30 dias;"
-        Write-Host "   - ou a retention policy nao esta movendo item nenhum"
-        Write-Host "     (RetentionPolicy atual: $($mbx.RetentionPolicy))."
+        Write-Host " If the user still complains about a full archive:"
+        Write-Host "   - provisioning of the auxiliary archive takes up to 30 days;"
+        Write-Host "   - or the retention policy is not moving any items"
+        Write-Host "     (current RetentionPolicy: $($mbx.RetentionPolicy))."
         return
     }
 
-    # ------------------------------------------------------- cenario [D] --
+    # ------------------------------------------------------ scenario [D] --
     if (-not $hasArchive) {
-        Write-Banner "SEM ARCHIVE PROVISIONADO" 'Yellow'
-        Write-Warn2 "ArchiveState = $($mbx.ArchiveState). Nao existe archive nesta mailbox."
+        Write-Banner "NO ARCHIVE PROVISIONED" 'Yellow'
+        Write-Warn2 "ArchiveState = $($mbx.ArchiveState). This mailbox has no archive."
         Write-Host ''
-        Write-Host " Auto-expand nem entra em pauta. Provisione o archive primeiro:"
+        Write-Host " Auto-expand is not even on the table. Provision the archive first:"
         Write-Host "   Enable-Mailbox -Identity '$($mbx.PrimarySmtpAddress)' -Archive" -ForegroundColor Yellow
         Write-Host ''
-        Write-Host " Depois rode este script de novo."
+        Write-Host " Then run this script again."
         return
     }
 
-    # ------------------------------------------------------- cenario [B] --
+    # ------------------------------------------------------ scenario [B] --
     if (-not $licensed) {
-        Write-Banner "SEM LICENCA DE ARCHIVING" 'Red'
+        Write-Banner "NO ARCHIVING LICENSE" 'Red'
         Write-Err2 "ArchiveQuota = $quotaGb GB."
         Write-Host ''
-        Write-Host " Quota de ~50 GB indica AUSENCIA de licenca de archiving."
-        Write-Host " Auto-Expanding Archive exige E3, E5 ou o add-on"
-        Write-Host " Exchange Online Archiving (EOA)."
+        Write-Host " A ~50 GB quota indicates NO archiving license."
+        Write-Host " Auto-Expanding Archive requires E3, E5 or the"
+        Write-Host " Exchange Online Archiving (EOA) add-on."
         Write-Host ''
-        Write-Warn2 "Habilitar aqui NAO daria espaco nenhum. Resolva a licenca primeiro."
+        Write-Warn2 "Enabling it here would NOT add any space. Fix the license first."
         Write-Host ''
-        Write-Host " Proximo passo: verificar o SKU do usuario no portal"
+        Write-Host " Next step: check the user's SKU in the portal"
         Write-Host " admin.microsoft.com -> Users -> Licenses and apps."
-        Write-Host " (Graph PowerShell esta bloqueado por Conditional Access nesta maquina.)"
         return
     }
 
-    # ------------------------------------------------------- cenario [C] --
-    Write-Banner "DESABILITADO - MAS TEM LICENCA. DA PRA HABILITAR." 'Yellow'
-    Write-Ok "Licenca confirmada (ArchiveQuota = $quotaGb GB)."
+    # ------------------------------------------------------ scenario [C] --
+    Write-Banner "DISABLED - BUT LICENSED. IT CAN BE ENABLED." 'Yellow'
+    Write-Ok "License confirmed (ArchiveQuota = $quotaGb GB)."
     Write-Warn2 "AutoExpandingArchiveEnabled = False"
     if ($pct) {
         Write-Host ''
-        Write-Host " Consumo atual: $usedGb GB de $quotaGb GB  ($pct%)"
+        Write-Host " Current usage: $usedGb GB of $quotaGb GB  ($pct%)"
         if ($warnGb -is [double] -and $usedGb -is [double] -and $usedGb -ge $warnGb) {
-            Write-Warn2 " Ja cruzou a ArchiveWarningQuota de $warnGb GB - por isso o alerta."
+            Write-Warn2 " Already past the ArchiveWarningQuota of $warnGb GB - that is why the alert."
         }
     }
 
     if ($mbx.LitigationHoldEnabled -eq $true -or $mbx.InPlaceHolds) {
         Write-Host ''
-        Write-Warn2 "ATENCAO: MAILBOX SOB HOLD."
+        Write-Warn2 "WARNING: MAILBOX ON HOLD."
         Write-Host "   LitigationHold : $($mbx.LitigationHoldEnabled)"
         Write-Host "   InPlaceHolds   : $($mbx.InPlaceHolds -join ', ')"
-        Write-Host "   Archives auxiliares tem limitacao em eDiscovery/Content Search."
-        Write-Host "   Valide com Cyber/Legal antes de prosseguir." -ForegroundColor Yellow
+        Write-Host "   Auxiliary archives have limitations in eDiscovery/Content Search."
+        Write-Host "   Check with your security/legal team before proceeding." -ForegroundColor Yellow
     }
 
     Write-Host ''
-    Write-Host ' ESTA ACAO E IRREVERSIVEL:' -ForegroundColor Red
-    Write-Host '   - nao desabilita depois, nem com ticket na Microsoft' -ForegroundColor Red
-    Write-Host '   - trava retorno da mailbox pro on-prem e complica move entre tenants' -ForegroundColor Red
-    Write-Host '   - limitacoes em eDiscovery/Content Search nos archives auxiliares' -ForegroundColor Red
-    Write-Host '   - cliente precisa ser Outlook 2016+ ou OWA' -ForegroundColor Red
+    Write-Host ' THIS ACTION IS IRREVERSIBLE:' -ForegroundColor Red
+    Write-Host '   - cannot be disabled later, not even with a Microsoft ticket' -ForegroundColor Red
+    Write-Host '   - blocks moving the mailbox back on-prem and complicates cross-tenant moves' -ForegroundColor Red
+    Write-Host '   - eDiscovery/Content Search limitations on auxiliary archives' -ForegroundColor Red
+    Write-Host '   - client must be Outlook 2016+ or OWA' -ForegroundColor Red
     Write-Host ''
 
     if ($Force) {
-        Write-Warn2 "-Force ativo: pulando confirmacao."
-    } elseif (-not (Read-YesNo "Habilitar Auto-Expanding Archive para $($mbx.PrimarySmtpAddress) AGORA?")) {
+        Write-Warn2 "-Force active: skipping confirmation."
+    } elseif (-not (Read-YesNo "Enable Auto-Expanding Archive for $($mbx.PrimarySmtpAddress) NOW?")) {
         Write-Host ''
-        Write-Warn2 "ABORTADO. Nada foi alterado."
-        Write-Host " Quando decidir, o comando e:"
+        Write-Warn2 "ABORTED. Nothing was changed."
+        Write-Host " When you decide, the command is:"
         Write-Host "   Enable-Mailbox -Identity '$($mbx.PrimarySmtpAddress)' -AutoExpandingArchive" -ForegroundColor Yellow
         return
     }
 
-    # ---------------------------------------------------------- executar --
+    # ----------------------------------------------------------- execute --
     Write-Host ''
-    Write-Step "Executando Enable-Mailbox -AutoExpandingArchive ..."
+    Write-Step "Running Enable-Mailbox -AutoExpandingArchive ..."
     try {
         Enable-Mailbox -Identity $mbx.Identity -AutoExpandingArchive -ErrorAction Stop | Out-Null
-        Write-Ok "Cmdlet executado sem erro."
+        Write-Ok "Cmdlet ran without errors."
     } catch {
-        Write-Err2 "FALHOU: $($_.Exception.Message)"
+        Write-Err2 "FAILED: $($_.Exception.Message)"
         Write-Host ''
-        Write-Host " Suspeito 1: PIM expirado (janela de 1-8h). Reative e tente de novo."
-        Write-Host " Suspeito 2: exige Exchange Administrator FULL, que voce nao tem no"
-        Write-Host "             cloud - so o subset Recipient. Nesse caso, escalar."
+        Write-Host " Suspect 1: role/PIM activation expired. Reactivate and try again."
+        Write-Host " Suspect 2: the operation may require the full Exchange Administrator role"
+        Write-Host "            rather than Recipient Administrator. In that case, escalate."
         return
     }
 
     Write-Host ''
-    Write-Step "Aguardando 30s de propagacao do EXO antes de verificar..."
+    Write-Step "Waiting 30s for EXO propagation before verifying..."
     Start-Countdown -Seconds 30
 
-    # --------------------------------------------------------- verificar --
-    Write-Step "Verificando resultado..."
+    # ------------------------------------------------------------ verify --
+    Write-Step "Verifying result..."
     Write-Host ''
     Write-Host "Get-Mailbox `"$($mbx.PrimarySmtpAddress)`" | FL AutoExpandingArchiveEnabled,ArchiveState,ArchiveQuota" -ForegroundColor DarkGray
     Write-Host ''
@@ -302,36 +302,36 @@ function Invoke-ArchiveCheck {
     $after | Format-List AutoExpandingArchiveEnabled, ArchiveState, ArchiveQuota
 
     if ($after.AutoExpandingArchiveEnabled -eq $true) {
-        Write-Banner "CONFIRMADO: AutoExpandingArchiveEnabled = True" 'Green'
+        Write-Banner "CONFIRMED: AutoExpandingArchiveEnabled = True" 'Green'
         Write-Host ''
-        Write-Host " O archive agora cresce automaticamente ate 1.5 TB."
+        Write-Host " The archive now grows automatically up to 1.5 TB."
         Write-Host ''
-        Write-Warn2 "MAS: o provisionamento da area auxiliar e ASSINCRONO e leva ATE 30 DIAS."
-        Write-Host " Ate la a margem real continua sendo o que sobra dos $quotaGb GB."
+        Write-Warn2 "BUT: provisioning of the auxiliary archive is ASYNCHRONOUS and takes UP TO 30 DAYS."
+        Write-Host " Until then the real headroom is whatever is left of the $quotaGb GB."
         if ($usedGb -is [double] -and $quotaGb -is [double]) {
-            Write-Host " Sobra hoje: aprox. $([math]::Round($quotaGb - $usedGb, 2)) GB."
+            Write-Host " Remaining today: approx. $([math]::Round($quotaGb - $usedGb, 2)) GB."
         }
-        Write-Host " Se bater o teto antes disso, o Managed Folder Assistant para de"
-        Write-Host " mover itens e o usuario toma erro."
+        Write-Host " If it hits the ceiling before that, the Managed Folder Assistant stops"
+        Write-Host " moving items and the user gets errors."
         Write-Host ''
-        Write-Host " NAO feche o ticket hoje. Remonitore em 7 dias rodando este script." -ForegroundColor Yellow
+        Write-Host " Re-check in 7 days by running this script again." -ForegroundColor Yellow
     } else {
-        Write-Banner "AINDA FALSE - propagacao pendente" 'Yellow'
-        Write-Warn2 "O cmdlet nao deu erro, entao provavelmente e so replicacao do EXO."
-        Write-Host " Reconsulte em ~15 minutos:"
+        Write-Banner "STILL FALSE - propagation pending" 'Yellow'
+        Write-Warn2 "The cmdlet did not error, so it is most likely just EXO replication."
+        Write-Host " Re-query in ~15 minutes:"
         Write-Host "   Get-Mailbox '$($mbx.PrimarySmtpAddress)' | FL AutoExpandingArchiveEnabled" -ForegroundColor Yellow
         Write-Host ''
-        Write-Host " Se continuar False depois de 1h, foi permissao silenciosa: escalar."
+        Write-Host " If it is still False after 1h, it was a silent permission issue: escalate."
     }
 }
 
 # ================================================================= main =====
 Clear-Host
-Write-Banner 'AUTO-EXPANDING ARCHIVE - AUDITORIA E HABILITACAO'
+Write-Banner 'AUTO-EXPANDING ARCHIVE - AUDIT AND ENABLEMENT'
 Write-Host '  Exchange Online' -ForegroundColor DarkGray
 Write-Host ''
-Write-Warn2 'Confirme que o PIM "Exchange Recipient Administrator" esta ATIVO.'
-Write-Host '  Entra -> Identity Governance -> PIM -> My roles -> Entra roles -> Activate' -ForegroundColor DarkGray
+Write-Warn2 'Make sure the role "Exchange Recipient Administrator" is ACTIVE.'
+Write-Host '  If you use PIM: Entra -> Identity Governance -> PIM -> My roles -> Entra roles -> Activate' -ForegroundColor DarkGray
 
 Connect-IfNeeded
 
@@ -340,22 +340,22 @@ while ($true) {
 
     if (-not $target) {
         Write-Host ''
-        $target = (Read-Host 'Email da pessoa (ENTER em branco para sair)').Trim()
+        $target = (Read-Host 'Mailbox email address (blank ENTER to exit)').Trim()
         if ([string]::IsNullOrWhiteSpace($target)) { break }
     }
 
     try {
         Invoke-ArchiveCheck -Target $target
     } catch {
-        Write-Err2 "Erro inesperado: $($_.Exception.Message)"
+        Write-Err2 "Unexpected error: $($_.Exception.Message)"
     }
 
     $target = $null
     Write-Host ''
-    if (-not (Read-YesNo 'Verificar outra mailbox?')) { break }
+    if (-not (Read-YesNo 'Check another mailbox?')) { break }
 }
 
 Write-Host ''
-Write-Ok 'Encerrado.'
-Write-Host 'Sessao EXO deixada ABERTA. Pra fechar:' -ForegroundColor DarkGray
+Write-Ok 'Done.'
+Write-Host 'EXO session left OPEN. To close it:' -ForegroundColor DarkGray
 Write-Host '  Disconnect-ExchangeOnline -Confirm:$false' -ForegroundColor DarkGray

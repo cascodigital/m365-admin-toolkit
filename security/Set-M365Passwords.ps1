@@ -1,78 +1,79 @@
 <#
 .SYNOPSIS
-    Gerador automatizado de senhas aleatorias para usuarios Microsoft 365 por dominio
+    Bulk random password generator for Microsoft 365 users, filtered by domain.
 
 .DESCRIPTION
-    Script automatizado para geracao e aplicacao em massa de senhas aleatorias em usuarios 
-    Microsoft 365/Azure AD. Utiliza o modulo Microsoft.Graph para conectividade moderna e 
-    gera senhas no formato memoravel (AA1234qq) com 2 caracteres maiusculos, 4 numeros 
-    e 2 caracteres minusculos.
-    
-    Funcionalidades principais:
-    - Geracao de senhas aleatorias com formato padronizado e seguro
-    - Filtragem automatica por dominio especifico
-    - Processamento em massa com controle de throttling
-    - Relatorio detalhado de sucessos e falhas
-    - Exportacao automatica para CSV com timestamp
-    - Validacao de permissoes e tratamento de erros robusto
+    Generates and applies random passwords in bulk to Microsoft 365 / Entra ID users.
+    Uses the Microsoft.Graph module and generates passwords in an easy-to-type format
+    (AA1234qq): 2 uppercase letters, 4 digits and 2 lowercase letters.
+
+    Main features:
+    - Random passwords in a fixed format
+    - Automatic filtering by a specific domain (enabled accounts only)
+    - Bulk processing with a throttling pause
+    - Detailed success/failure report
+    - Automatic CSV export with timestamp
+    - Permission hints and error handling
 
 .PARAMETER None
-    Script interativo - solicita dominio alvo durante execucao
+    Interactive script - prompts for the target domain at run time.
 
 .EXAMPLE
-    .\Generate-RandomPasswords.ps1
-    # Script solicita: Digite o dominio para aplicar a nova senha (exemplo: empresa.com.br)
-    # Digite: cascodigital.com.br
-    # Processa todos usuarios habilitados do dominio cascodigital.com.br
-    # Confirma lista de usuarios encontrados
-    # Aplica novas senhas e gera relatorio CSV
+    .\Set-M365Passwords.ps1
+    # Prompt: Enter the domain to apply the new passwords to (example: contoso.com)
+    # Input:  contoso.com
+    # Lists all enabled users of contoso.com, asks for confirmation,
+    # applies the new passwords and writes a CSV report.
 
 .INPUTS
-    String - Dominio alvo inserido interativamente pelo usuario
+    String - Target domain entered interactively.
 
 .OUTPUTS
-    - Arquivo CSV: Senhas_Usuarios_[dominio]_[timestamp].csv
-    - Console: Lista de usuarios processados com status
-    - Relatorio: Estatisticas de sucessos e falhas
+    - CSV file: M365_Passwords_[domain]_[timestamp].csv in the current directory
+      Columns: Name, Email, NewPassword, Status ('Success' or the error message)
+    - Console: processed users and status
+    - Summary: success and failure counts
 
 .NOTES
-    Autor         : Andre Kittler
-    Versao        : 2.0
-    Compatibilidade: PowerShell 5.1+, Windows/Linux/macOS
-    
-    Requisitos Microsoft Graph:
-    - Modulo Microsoft.Graph instalado
-    - Permissoes necessarias:
+    Version       : 2.0
+    Compatibility : PowerShell 5.1+, Windows/Linux/macOS
+
+    Microsoft Graph requirements:
+    - Microsoft.Graph module installed
+    - Delegated permissions requested:
       * User.ReadWrite.All
       * Directory.ReadWrite.All
       * UserAuthenticationMethod.ReadWrite.All
       * Directory.AccessAsUser.All
-    
-    Privilegios administrativos necessarios:
-    - Global Administrator OU
-    - User Administrator OU  
+
+    Required admin role (one of):
+    - Global Administrator
+    - User Administrator
     - Password Administrator
-    
-    Formato de senha gerada:
-    - Padrao: AA1234qq (8 caracteres)
-    - 2 caracteres maiusculos aleatorios
-    - 4 numeros aleatorios
-    - 2 caracteres minusculos aleatorios
-    
-    Configuracoes de seguranca:
+
+    Generated password format:
+    - Pattern: AA1234qq (8 characters)
+    - 2 random uppercase letters
+    - 4 random digits
+    - 2 random lowercase letters
+
+    Security settings:
     - ForceChangePasswordNextSignIn: false
-    - Senhas definidas como finais (usuarios nao precisam alterar)
-    - Throttling de 1 segundo entre processamentos
+    - Passwords are final (users are not required to change them)
+    - 1 second pause between users (throttling)
+
+    WARNING: the CSV contains plain-text passwords. Store it securely and delete
+    it once the passwords have been distributed.
 
 .LINK
-    https://docs.microsoft.com/en-us/graph/api/user-update
-    
+    https://learn.microsoft.com/graph/api/user-update
+
 .LINK
-    https://docs.microsoft.com/en-us/graph/permissions-reference
+    https://learn.microsoft.com/graph/permissions-reference
 #>
 
 
-# Instalar e importar o modulo se necessario
+# Install and import the module if needed
 if (!(Get-Module -ListAvailable -Name Microsoft.Graph)) {
     Install-Module Microsoft.Graph -Scope CurrentUser -Force
 }
@@ -80,192 +81,192 @@ if (!(Get-Module -ListAvailable -Name Microsoft.Graph)) {
 Import-Module Microsoft.Graph.Users
 Import-Module Microsoft.Graph.Authentication
 
-# Funcao para gerar senha no formato especificado
+# Generates a password in the AA1234qq format
 function New-RandomPassword {
-    # 2 caracteres maiusculos
+    # 2 uppercase letters
     $upperChars = -join ((65..90) | Get-Random -Count 2 | ForEach-Object {[char]$_})
-    
-    # 4 numeros
+
+    # 4 digits
     $numbers = -join ((0..9) | Get-Random -Count 4)
-    
-    # 2 caracteres minusculos
+
+    # 2 lowercase letters
     $lowerChars = -join ((97..122) | Get-Random -Count 2 | ForEach-Object {[char]$_})
-    
+
     return $upperChars + $numbers + $lowerChars
 }
 
-# Conectar ao Microsoft Graph com permissoes adequadas
-Write-Host "Conectando ao Microsoft Graph..." -ForegroundColor Green
-Write-Host "IMPORTANTE: Certifique-se de estar logado com uma conta que tenha privilegios de:" -ForegroundColor Yellow
-Write-Host "- Global Administrator OU" -ForegroundColor Yellow  
-Write-Host "- User Administrator OU" -ForegroundColor Yellow
+# Connect to Microsoft Graph with the required permissions
+Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Green
+Write-Host "IMPORTANT: Sign in with an account that holds one of these roles:" -ForegroundColor Yellow
+Write-Host "- Global Administrator OR" -ForegroundColor Yellow
+Write-Host "- User Administrator OR" -ForegroundColor Yellow
 Write-Host "- Password Administrator" -ForegroundColor Yellow
 
 try {
-    # Permissoes necessarias para reset de senhas
+    # Permissions required for password resets
     $scopes = @(
         "User.ReadWrite.All",
-        "Directory.ReadWrite.All", 
+        "Directory.ReadWrite.All",
         "UserAuthenticationMethod.ReadWrite.All",
         "Directory.AccessAsUser.All"
     )
-    
+
     Connect-MgGraph -Scopes $scopes
 }
 catch {
-    Write-Host "Erro ao conectar: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Error while connecting: $($_.Exception.Message)" -ForegroundColor Red
     exit
 }
 
-# Verificar contexto atual
+# Show the current context
 $context = Get-MgContext
-Write-Host "Conectado como: $($context.Account)" -ForegroundColor Green
+Write-Host "Connected as: $($context.Account)" -ForegroundColor Green
 
-# Solicitar o dominio
-$targetDomain = Read-Host "Digite o dominio para aplicar a nova senha (exemplo: empresa.com.br)"
+# Ask for the domain
+$targetDomain = Read-Host "Enter the domain to apply the new passwords to (example: contoso.com)"
 
 if ([string]::IsNullOrWhiteSpace($targetDomain)) {
-    Write-Host "Dominio nao pode estar vazio!" -ForegroundColor Red
+    Write-Host "Domain cannot be empty!" -ForegroundColor Red
     exit
 }
 
-Write-Host "Buscando usuarios do dominio: $targetDomain" -ForegroundColor Yellow
+Write-Host "Looking up users in domain: $targetDomain" -ForegroundColor Yellow
 
-# Buscar todos os usuarios
+# Retrieve all users
 try {
     $allUsers = Get-MgUser -All -Property "Id,UserPrincipalName,DisplayName,AccountEnabled"
 }
 catch {
-    Write-Host "Erro ao buscar usuarios: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "Verifique se voce tem permissoes adequadas." -ForegroundColor Red
+    Write-Host "Error while retrieving users: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Check that you have the required permissions." -ForegroundColor Red
     exit
 }
 
-# Filtrar apenas usuarios do dominio especificado e que estao habilitados
-$targetUsers = $allUsers | Where-Object { 
-    $_.UserPrincipalName -like "*@$targetDomain" -and 
-    $_.AccountEnabled -eq $true 
+# Keep only enabled users of the specified domain
+$targetUsers = $allUsers | Where-Object {
+    $_.UserPrincipalName -like "*@$targetDomain" -and
+    $_.AccountEnabled -eq $true
 }
 
 if ($targetUsers.Count -eq 0) {
-    Write-Host "Nenhum usuario encontrado no dominio $targetDomain" -ForegroundColor Red
+    Write-Host "No users found in domain $targetDomain" -ForegroundColor Red
     exit
 }
 
-Write-Host "Encontrados $($targetUsers.Count) usuarios no dominio $targetDomain" -ForegroundColor Green
+Write-Host "Found $($targetUsers.Count) users in domain $targetDomain" -ForegroundColor Green
 
-# Mostrar usuarios encontrados
-Write-Host "`nUsuarios que terao a senha alterada:" -ForegroundColor Cyan
+# List the users found
+Write-Host "`nUsers whose password will be changed:" -ForegroundColor Cyan
 foreach ($user in $targetUsers) {
     Write-Host "- $($user.DisplayName) ($($user.UserPrincipalName))" -ForegroundColor White
 }
 
-# Confirmar acao
-$confirm = Read-Host "`nDeseja continuar e alterar as senhas destes usuarios? (S/N)"
-if ($confirm -ne "S" -and $confirm -ne "s") {
-    Write-Host "Operacao cancelada pelo usuario." -ForegroundColor Yellow
+# Confirm (S is still accepted for backward compatibility)
+$confirm = Read-Host "`nContinue and change the passwords of these users? (Y/N)"
+if ($confirm -notin @('Y', 'y', 'S', 's')) {
+    Write-Host "Operation cancelled by the user." -ForegroundColor Yellow
     exit
 }
 
-# Array para armazenar resultados
+# Results collection
 $results = @()
 
-# Processar cada usuario
-Write-Host "`nProcessando usuarios..." -ForegroundColor Green
+# Process each user
+Write-Host "`nProcessing users..." -ForegroundColor Green
 foreach ($user in $targetUsers) {
     try {
-        # Gerar nova senha
+        # Generate a new password
         $newPassword = New-RandomPassword
-        
-        Write-Host "Processando: $($user.UserPrincipalName)..." -ForegroundColor Yellow
-        
-        # Atualizar senha do usuario (metodo alternativo)
+
+        Write-Host "Processing: $($user.UserPrincipalName)..." -ForegroundColor Yellow
+
+        # Password profile
         $passwordProfile = @{
             Password = $newPassword
             ForceChangePasswordNextSignIn = $false
         }
-        
-        # Tentar atualizar a senha
+
+        # Update the password
         Update-MgUser -UserId $user.Id -PasswordProfile $passwordProfile -ErrorAction Stop
-        
-        # Adicionar ao resultado
+
+        # Record the result (CSV column names/values kept for compatibility)
         $results += [PSCustomObject]@{
-            'Nome' = $user.DisplayName
+            'Name' = $user.DisplayName
             'Email' = $user.UserPrincipalName
-            'Nova Senha' = $newPassword
-            'Status' = 'Sucesso'
+            'NewPassword' = $newPassword
+            'Status' = 'Success'
         }
-        
-        Write-Host "✓ Senha alterada para: $($user.UserPrincipalName)" -ForegroundColor Green
-        
-        # Pequena pausa para evitar throttling
+
+        Write-Host "[OK] Password changed for: $($user.UserPrincipalName)" -ForegroundColor Green
+
+        # Short pause to avoid throttling
         Start-Sleep -Milliseconds 1000
     }
     catch {
-        # Em caso de erro
+        # On error
         $errorMessage = $_.Exception.Message
-        
+
         $results += [PSCustomObject]@{
-            'Nome' = $user.DisplayName
+            'Name' = $user.DisplayName
             'Email' = $user.UserPrincipalName
-            'Nova Senha' = 'ERRO'
+            'NewPassword' = 'ERROR'
             'Status' = $errorMessage
         }
-        
-        Write-Host "✗ Erro ao alterar senha para: $($user.UserPrincipalName)" -ForegroundColor Red
-        Write-Host "  Erro: $errorMessage" -ForegroundColor Red
-        
-        # Se for erro de permissao, dar dica
+
+        Write-Host "[FAIL] Error changing password for: $($user.UserPrincipalName)" -ForegroundColor Red
+        Write-Host "  Error: $errorMessage" -ForegroundColor Red
+
+        # Hint on permission errors
         if ($errorMessage -like "*Insufficient privileges*" -or $errorMessage -like "*Authorization_RequestDenied*") {
-            Write-Host "  DICA: Voce precisa de privilegios administrativos para alterar senhas!" -ForegroundColor Red
+            Write-Host "  HINT: Administrative privileges are required to change passwords!" -ForegroundColor Red
         }
     }
 }
 
-# Gerar arquivo Excel
+# Write the CSV report
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$excelPath = "Senhas_Usuarios_$($targetDomain.Replace('.','_'))_$timestamp.csv"
+$excelPath = "M365_Passwords_$($targetDomain.Replace('.','_'))_$timestamp.csv"
 
 try {
     $results | Export-Csv -Path $excelPath -NoTypeInformation -Encoding UTF8
-    Write-Host "`nArquivo gerado: $excelPath" -ForegroundColor Green
-    
-    # Tentar abrir o arquivo
+    Write-Host "`nFile created: $excelPath" -ForegroundColor Green
+
+    # Offer to open the file
     if (Test-Path $excelPath) {
-        $openFile = Read-Host "Deseja abrir o arquivo agora? (S/N)"
-        if ($openFile -eq "S" -or $openFile -eq "s") {
+        $openFile = Read-Host "Open the file now? (Y/N)"
+        if ($openFile -in @('Y', 'y', 'S', 's')) {
             Start-Process $excelPath
         }
     }
 }
 catch {
-    Write-Host "Erro ao gerar arquivo CSV: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Error writing CSV file: $($_.Exception.Message)" -ForegroundColor Red
 }
 
-# Resumo final
-Write-Host "`n=== RESUMO ===" -ForegroundColor Cyan
-Write-Host "Dominio processado: $targetDomain" -ForegroundColor White
-Write-Host "Total de usuarios: $($targetUsers.Count)" -ForegroundColor White
-Write-Host "Sucessos: $(($results | Where-Object {$_.Status -eq 'Sucesso'}).Count)" -ForegroundColor Green
-Write-Host "Erros: $(($results | Where-Object {$_.Status -ne 'Sucesso'}).Count)" -ForegroundColor Red
+# Final summary
+Write-Host "`n=== SUMMARY ===" -ForegroundColor Cyan
+Write-Host "Domain processed: $targetDomain" -ForegroundColor White
+Write-Host "Total users: $($targetUsers.Count)" -ForegroundColor White
+Write-Host "Succeeded: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+Write-Host "Failed: $(($results | Where-Object {$_.Status -ne 'Success'}).Count)" -ForegroundColor Red
 
-# Mostrar usuarios com sucesso
-$sucessos = $results | Where-Object {$_.Status -eq 'Sucesso'}
-if ($sucessos.Count -gt 0) {
-    Write-Host "`nSenhas alteradas com sucesso:" -ForegroundColor Green
-    foreach ($sucesso in $sucessos) {
-        Write-Host "✓ $($sucesso.Email) - Nova senha: $($sucesso.'Nova Senha')" -ForegroundColor Green
+# List successful changes
+$successes = $results | Where-Object {$_.Status -eq 'Success'}
+if ($successes.Count -gt 0) {
+    Write-Host "`nPasswords changed successfully:" -ForegroundColor Green
+    foreach ($success in $successes) {
+        Write-Host "[OK] $($success.Email) - New password: $($success.'NewPassword')" -ForegroundColor Green
     }
 }
 
-# Desconectar
+# Disconnect
 Disconnect-MgGraph
 
-Write-Host "`nScript finalizado!" -ForegroundColor Green
-Write-Host "As senhas foram definidas como finais - usuarios nao precisam alterar." -ForegroundColor Yellow
+Write-Host "`nScript finished!" -ForegroundColor Green
+Write-Host "Passwords were set as final - users are not required to change them." -ForegroundColor Yellow
 
-if (($results | Where-Object {$_.Status -ne 'Sucesso'}).Count -gt 0) {
-    Write-Host "`nIMPORTANTE: Alguns usuarios tiveram erro. Verifique se voce tem:" -ForegroundColor Red
-    Write-Host "- Privilegios de Global Administrator, User Administrator ou Password Administrator" -ForegroundColor Red
-    Write-Host "- Permissoes adequadas no tenant" -ForegroundColor Red
+if (($results | Where-Object {$_.Status -ne 'Success'}).Count -gt 0) {
+    Write-Host "`nIMPORTANT: Some users failed. Make sure you have:" -ForegroundColor Red
+    Write-Host "- The Global Administrator, User Administrator or Password Administrator role" -ForegroundColor Red
+    Write-Host "- Adequate permissions in the tenant" -ForegroundColor Red
 }

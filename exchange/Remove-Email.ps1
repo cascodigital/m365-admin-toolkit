@@ -1,328 +1,316 @@
 <#
 .SYNOPSIS
-    Remocao automatizada de emails em Microsoft 365 com verificacao e instalacao automatica de dependencias
+    Removes (soft-deletes) a specific email from all mailboxes in Microsoft 365 using a
+    Purview compliance search and purge action.
 
 .DESCRIPTION
-    Script corporativo autocontido - versao 3.1 com correcao de desinstalacao
-    
+    Interactive script for incident response (phishing, mail sent by mistake):
+      1. Checks that ExchangeOnlineManagement 3.x is installed (it does NOT install it).
+      2. Connects to Security & Compliance PowerShell (Connect-IPPSSession
+         -EnableSearchOnlySession), reusing an existing session if there is one.
+      3. Creates and runs a compliance search over all Exchange mailboxes for
+         sender + subject.
+      4. Shows the hit count, asks for confirmation and starts a SoftDelete purge.
+      5. Polls the purge action until it completes and reports the result.
+
+    PURGE LIMIT: a single purge action removes at most 10 items PER MAILBOX
+    (Microsoft limit for New-ComplianceSearchAction -Purge). If a mailbox holds more
+    than 10 matching items, run the script again (with the same sender/subject) until
+    the search returns 0 items.
+
+    SoftDelete moves the items to the Recoverable Items folder, where they stay for the
+    deleted item retention period (14 days by default, up to 30) and can be recovered.
+
+.PARAMETER Sender
+    Sender address to match (from:). Prompted if omitted.
+
+.PARAMETER Subject
+    Subject to match (subject:). Prompted if omitted.
+
+.PARAMETER PurgeTimeoutMinutes
+    How long to wait for the purge action to finish before giving up polling. Default 30.
+
+.EXAMPLE
+    .\Remove-Email.ps1
+    Prompts for the sender and subject.
+
+.EXAMPLE
+    .\Remove-Email.ps1 -Sender phishing@external.com -Subject "Invoice overdue"
+
 .NOTES
-    Autor         : Andre Kittler
-    Versao        : 3.1 (Corrigido erro AllowPrerelease)
-    Data          : 2025-11-23
+    Requires: ExchangeOnlineManagement 3.x with Connect-IPPSSession -EnableSearchOnlySession
+              (3.9.0 or later). Install/update it yourself, for example:
+                  Install-Module ExchangeOnlineManagement -Scope CurrentUser
+                  Update-Module ExchangeOnlineManagement
+    Role    : Purview "Search And Purge" (e.g. Organization Management or a custom
+              eDiscovery role group with Compliance Search + Search And Purge).
+    Version : 3.2
 #>
+
+[CmdletBinding()]
+param(
+    [string]$Sender,
+    [string]$Subject,
+    [int]$PurgeTimeoutMinutes = 30
+)
 
 function Write-ColorMessage {
     param(
         [string]$Message,
         [string]$Type = "Info"
     )
-    
+
     switch ($Type) {
-        "Success" { Write-Host "✓ $Message" -ForegroundColor Green }
-        "Error" { Write-Host "✗ $Message" -ForegroundColor Red }
-        "Warning" { Write-Host "⚠ $Message" -ForegroundColor Yellow }
-        "Info" { Write-Host "ℹ $Message" -ForegroundColor Cyan }
-        "Progress" { Write-Host "→ $Message" -ForegroundColor White }
-        default { Write-Host $Message }
+        "Success"  { Write-Host "[OK]   $Message" -ForegroundColor Green }
+        "Error"    { Write-Host "[ERR]  $Message" -ForegroundColor Red }
+        "Warning"  { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
+        "Info"     { Write-Host "[INFO] $Message" -ForegroundColor Cyan }
+        "Progress" { Write-Host "  ->   $Message" -ForegroundColor White }
+        default    { Write-Host $Message }
     }
 }
 
-function Test-ModuleVersion {
-    $installedModule = Get-InstalledModule -Name ExchangeOnlineManagement -AllVersions -ErrorAction SilentlyContinue | 
-        Sort-Object Version -Descending | 
-        Select-Object -First 1
-    
-    if (!$installedModule) {
-        return $null
-    }
-    
-    return $installedModule.Version
-}
-
-function Install-RequiredModule {
-    Write-ColorMessage "=== VERIFICAÇÃO DE DEPENDÊNCIAS ===" -Type "Info"
+function Test-RequiredModule {
+    Write-ColorMessage "=== DEPENDENCY CHECK ===" -Type "Info"
     Write-Host ""
-    
-    $currentVersion = Test-ModuleVersion
-    
-    if ($currentVersion) {
-        Write-ColorMessage "Versão instalada: $currentVersion" -Type "Progress"
-    } else {
-        Write-ColorMessage "ExchangeOnlineManagement não encontrado" -Type "Warning"
-    }
-    
-    # Verificar se precisa atualizar
-    $needsUpdate = $false
-    
-    if (!$currentVersion) {
-        $needsUpdate = $true
-        Write-ColorMessage "Módulo não instalado - instalação necessária" -Type "Warning"
-    } elseif ($currentVersion -lt [version]"3.9.1") {
-        $needsUpdate = $true
-        Write-ColorMessage "Versão antiga detectada - atualização necessária (mínimo: 3.9.1-Preview1)" -Type "Warning"
-    }
-    
-    if ($needsUpdate) {
-        Write-Host ""
-        Write-ColorMessage "Para executar este script é necessário ExchangeOnlineManagement 3.9.1-Preview1+" -Type "Info"
-        $confirm = Read-Host "Deseja instalar/atualizar automaticamente? (S/N)"
-        
-        if ($confirm -ne 'S' -and $confirm -ne 's') {
-            Write-ColorMessage "Operação cancelada pelo usuário" -Type "Error"
-            Write-Host ""
-            Write-ColorMessage "Para instalar manualmente execute:" -Type "Info"
-            Write-Host "Install-Module ExchangeOnlineManagement -AllowPrerelease -Force" -ForegroundColor Gray
-            exit
+
+    $module = Get-Module -ListAvailable -Name ExchangeOnlineManagement |
+        Sort-Object Version -Descending |
+        Select-Object -First 1
+
+    if (-not $module -or $module.Version -lt [version]'3.0.0') {
+        if ($module) {
+            Write-ColorMessage "ExchangeOnlineManagement $($module.Version) found - version 3.x or later is required." -Type "Error"
+        } else {
+            Write-ColorMessage "ExchangeOnlineManagement module not found." -Type "Error"
         }
-        
         Write-Host ""
-        Write-ColorMessage "Instalando ExchangeOnlineManagement Preview..." -Type "Progress"
-        
-        try {
-            # Remover módulo da sessão atual
-            if (Get-Module ExchangeOnlineManagement) {
-                Write-ColorMessage "Removendo módulo da sessão..." -Type "Progress"
-                Remove-Module ExchangeOnlineManagement -Force -ErrorAction SilentlyContinue
-            }
-            
-            # Desinstalar versões antigas (corrigido)
-            if ($currentVersion) {
-                Write-ColorMessage "Desinstalando versões antigas..." -Type "Progress"
-                
-                $allVersions = Get-InstalledModule ExchangeOnlineManagement -AllVersions -ErrorAction SilentlyContinue
-                foreach ($version in $allVersions) {
-                    try {
-                        Write-Host "  Removendo versão $($version.Version)..." -ForegroundColor Gray
-                        Uninstall-Module -Name ExchangeOnlineManagement -RequiredVersion $version.Version -Force -ErrorAction Stop
-                    } catch {
-                        Write-ColorMessage "  Aviso: Não foi possível remover versão $($version.Version)" -Type "Warning"
-                    }
-                }
-            }
-            
-            # Aguardar um momento
-            Start-Sleep -Seconds 2
-            
-            # Instalar versão Preview
-            Write-ColorMessage "Instalando versão Preview mais recente..." -Type "Progress"
-            Install-Module -Name ExchangeOnlineManagement -AllowPrerelease -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction Stop
-            
-            # Importar módulo
-            Import-Module ExchangeOnlineManagement -Force -ErrorAction Stop
-            
-            $newVersion = (Get-InstalledModule ExchangeOnlineManagement -AllVersions | Sort-Object Version -Descending | Select-Object -First 1).Version
-            Write-ColorMessage "Instalado com sucesso: versão $newVersion" -Type "Success"
-            
-            Write-Host ""
-            Write-ColorMessage "IMPORTANTE: Reinicie o PowerShell para garantir que a nova versão seja carregada" -Type "Warning"
-            $restart = Read-Host "Deseja sair agora e reiniciar o PowerShell? (S/N)"
-            
-            if ($restart -eq 'S' -or $restart -eq 's') {
-                Write-ColorMessage "Feche esta janela e abra um novo PowerShell, depois execute o script novamente" -Type "Info"
-                exit
-            }
-            
-        } catch {
-            Write-ColorMessage "Erro ao instalar: $($_.Exception.Message)" -Type "Error"
-            Write-Host ""
-            Write-ColorMessage "SOLUÇÃO MANUAL:" -Type "Warning"
-            Write-Host "1. Feche TODAS as janelas PowerShell abertas" -ForegroundColor Gray
-            Write-Host "2. Abra nova janela PowerShell como Administrador" -ForegroundColor Gray
-            Write-Host "3. Execute os seguintes comandos:" -ForegroundColor Gray
-            Write-Host ""
-            Write-Host "   # Remover versões antigas" -ForegroundColor Yellow
-            Write-Host "   Get-InstalledModule ExchangeOnlineManagement -AllVersions | Uninstall-Module -Force" -ForegroundColor White
-            Write-Host ""
-            Write-Host "   # Instalar Preview" -ForegroundColor Yellow
-            Write-Host "   Install-Module ExchangeOnlineManagement -AllowPrerelease -Force -SkipPublisherCheck" -ForegroundColor White
-            Write-Host ""
-            Write-Host "4. Feche e abra novo PowerShell" -ForegroundColor Gray
-            Write-Host "5. Execute este script novamente" -ForegroundColor Gray
-            Write-Host ""
-            exit
-        }
-    } else {
-        Write-ColorMessage "Versão adequada já instalada" -Type "Success"
-        Import-Module ExchangeOnlineManagement -Force
+        Write-ColorMessage "Install or update it, then run this script again:" -Type "Info"
+        Write-Host "  Install-Module ExchangeOnlineManagement -Scope CurrentUser" -ForegroundColor Gray
+        Write-Host "  Update-Module ExchangeOnlineManagement" -ForegroundColor Gray
+        exit 1
     }
-    
+
+    Write-ColorMessage "Installed version: $($module.Version)" -Type "Progress"
+    Import-Module ExchangeOnlineManagement -ErrorAction Stop
     Write-Host ""
 }
 
 function Connect-M365Services {
-    Write-ColorMessage "=== CONEXÃO AOS SERVIÇOS ===" -Type "Info"
+    Write-ColorMessage "=== CONNECTING ===" -Type "Info"
     Write-Host ""
-    
-    # Verificar se Connect-IPPSSession suporta -EnableSearchOnlySession
+
+    # Does Connect-IPPSSession support -EnableSearchOnlySession?
     $supportsSearchOnly = $false
     try {
         $params = (Get-Command Connect-IPPSSession -ErrorAction Stop).Parameters
         $supportsSearchOnly = $params.ContainsKey('EnableSearchOnlySession')
     } catch {
-        Write-ColorMessage "Erro ao verificar comando Connect-IPPSSession" -Type "Error"
-        Write-ColorMessage "Certifique-se de ter reiniciado o PowerShell após a instalação" -Type "Warning"
-        exit
+        Write-ColorMessage "Connect-IPPSSession is not available in this session." -Type "Error"
+        Write-ColorMessage "If you just installed/updated the module, open a new PowerShell window." -Type "Warning"
+        exit 1
     }
-    
-    if (!$supportsSearchOnly) {
-        Write-ColorMessage "ERRO: Parâmetro -EnableSearchOnlySession não disponível" -Type "Error"
-        Write-ColorMessage "Isso pode significar que:" -Type "Warning"
-        Write-Host "  1. A versão Preview não foi instalada corretamente" -ForegroundColor Gray
-        Write-Host "  2. O PowerShell não foi reiniciado após a instalação" -ForegroundColor Gray
-        Write-Host "  3. Uma versão antiga ainda está em cache" -ForegroundColor Gray
-        Write-Host ""
-        Write-ColorMessage "SOLUÇÃO: Feche TODAS janelas PowerShell, abra nova janela e execute o script novamente" -Type "Info"
-        exit
+
+    if (-not $supportsSearchOnly) {
+        Write-ColorMessage "Connect-IPPSSession does not support -EnableSearchOnlySession." -Type "Error"
+        Write-ColorMessage "Update ExchangeOnlineManagement to 3.9.0 or later:" -Type "Info"
+        Write-Host "  Update-Module ExchangeOnlineManagement" -ForegroundColor Gray
+        Write-ColorMessage "Then close ALL PowerShell windows, open a new one and run the script again." -Type "Info"
+        exit 1
     }
-    
-    Write-ColorMessage "Suporte a -EnableSearchOnlySession: OK" -Type "Success"
+
+    Write-ColorMessage "-EnableSearchOnlySession support: OK" -Type "Success"
     Write-Host ""
-    
-    # Conectar ao Compliance
-    Write-ColorMessage "Conectando ao Security & Compliance Center..." -Type "Progress"
+
+    Write-ColorMessage "Connecting to Security & Compliance..." -Type "Progress"
     try {
         Get-ComplianceSearch -ResultSize 1 -ErrorAction Stop | Out-Null
-        Write-ColorMessage "Já conectado!" -Type "Success"
+        Write-ColorMessage "Already connected." -Type "Success"
     } catch {
         try {
             Connect-IPPSSession -EnableSearchOnlySession -ShowBanner:$false -ErrorAction Stop
-            Write-ColorMessage "Conectado com sucesso!" -Type "Success"
+            Write-ColorMessage "Connected." -Type "Success"
         } catch {
-            Write-ColorMessage "Erro ao conectar: $($_.Exception.Message)" -Type "Error"
-            exit
+            Write-ColorMessage "Connection failed: $($_.Exception.Message)" -Type "Error"
+            exit 1
         }
     }
-    
+
     Write-Host ""
 }
 
+function Wait-PurgeAction {
+    param(
+        [Parameter(Mandatory)][string]$ActionName,
+        [int]$TimeoutMinutes = 30
+    )
+
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $action = $null
+    do {
+        Start-Sleep -Seconds 15
+        $action = Get-ComplianceSearchAction -Identity $ActionName -ErrorAction SilentlyContinue
+        $status = if ($action) { $action.Status } else { '(not visible yet)' }
+        Write-Host "    Purge status: $status" -ForegroundColor Gray
+        if ($action -and $action.Status -in @('Completed', 'PartiallySucceeded', 'Failed')) { break }
+    } while ((Get-Date) -lt $deadline)
+
+    return $action
+}
+
 function Remove-EmailBySearch {
-    Write-ColorMessage "=== REMOÇÃO DE E-MAILS ===" -Type "Info"
+    Write-ColorMessage "=== EMAIL REMOVAL ===" -Type "Info"
     Write-Host ""
-    
-    # Solicitar dados
-    $sender = Read-Host "Digite o endereço do remetente"
+
+    $sender = $script:Sender
+    if ([string]::IsNullOrWhiteSpace($sender)) { $sender = Read-Host "Sender address" }
     if ([string]::IsNullOrWhiteSpace($sender)) {
-        Write-ColorMessage "Remetente não pode estar vazio!" -Type "Error"
-        exit
+        Write-ColorMessage "Sender cannot be empty." -Type "Error"
+        exit 1
     }
-    
-    $subject = Read-Host "Digite o assunto do e-mail"
+
+    $subject = $script:Subject
+    if ([string]::IsNullOrWhiteSpace($subject)) { $subject = Read-Host "Email subject" }
     if ([string]::IsNullOrWhiteSpace($subject)) {
-        Write-ColorMessage "Assunto não pode estar vazio!" -Type "Error"
-        exit
+        Write-ColorMessage "Subject cannot be empty." -Type "Error"
+        exit 1
     }
-    
-    # Gerar nome único
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $searchName = "RemocaoEmail_$timestamp"
+
+    # Unique search name
+    $timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+    $searchName  = "EmailRemoval_$timestamp"
     $searchQuery = "(from:$sender) AND (subject:'$subject')"
-    
+
     Write-Host ""
-    Write-ColorMessage "RESUMO DA OPERAÇÃO:" -Type "Info"
-    Write-Host "  Remetente: $sender"
-    Write-Host "  Assunto: $subject"
-    Write-Host "  Query: $searchQuery"
-    Write-Host "  Busca: $searchName"
+    Write-ColorMessage "OPERATION SUMMARY:" -Type "Info"
+    Write-Host "  Sender : $sender"
+    Write-Host "  Subject: $subject"
+    Write-Host "  Query  : $searchQuery"
+    Write-Host "  Search : $searchName"
     Write-Host ""
-    
-    $confirm = Read-Host "Prosseguir com a remoção? (S/N)"
-    if ($confirm -ne 'S' -and $confirm -ne 's') {
-        Write-ColorMessage "Operação cancelada" -Type "Warning"
+
+    $confirm = Read-Host "Run the search? (Y/N)"
+    if ($confirm -notmatch '^[YySs]') {
+        Write-ColorMessage "Operation cancelled." -Type "Warning"
         exit
     }
-    
+
     Write-Host ""
-    Write-ColorMessage "=== PROCESSANDO ===" -Type "Info"
-    
+    Write-ColorMessage "=== PROCESSING ===" -Type "Info"
+
     try {
-        # 1. Criar busca
-        Write-ColorMessage "1/5 Criando busca de conformidade..." -Type "Progress"
+        # 1. Create the search
+        Write-ColorMessage "1/6 Creating compliance search..." -Type "Progress"
         New-ComplianceSearch -Name $searchName -ExchangeLocation All -ContentMatchQuery $searchQuery -ErrorAction Stop | Out-Null
-        Write-ColorMessage "Busca criada" -Type "Success"
-        
-        # 2. Iniciar busca
-        Write-ColorMessage "2/5 Iniciando busca..." -Type "Progress"
+        Write-ColorMessage "Search created." -Type "Success"
+
+        # 2. Start the search
+        Write-ColorMessage "2/6 Starting search..." -Type "Progress"
         Start-ComplianceSearch -Identity $searchName -ErrorAction Stop
-        Write-ColorMessage "Busca iniciada" -Type "Success"
-        
-        # 3. Aguardar conclusão
-        Write-ColorMessage "3/5 Aguardando conclusão da busca..." -Type "Progress"
+        Write-ColorMessage "Search started." -Type "Success"
+
+        # 3. Wait for completion
+        Write-ColorMessage "3/6 Waiting for the search to complete..." -Type "Progress"
         $attempts = 0
         do {
             Start-Sleep -Seconds 10
             $searchStatus = Get-ComplianceSearch -Identity $searchName
             $attempts++
-            Write-Host "    Status: $($searchStatus.Status) (tentativa $attempts)" -ForegroundColor Gray
-            
+            Write-Host "    Status: $($searchStatus.Status) (attempt $attempts)" -ForegroundColor Gray
+
             if ($searchStatus.Status -eq 'Failed') {
-                throw "Busca falhou"
+                throw "Search failed."
             }
         } while ($searchStatus.Status -ne 'Completed' -and $attempts -lt 60)
-        
+
         if ($searchStatus.Status -ne 'Completed') {
-            throw "Timeout: busca não completou em 10 minutos"
+            throw "Timeout: the search did not complete within 10 minutes."
         }
-        
-        Write-ColorMessage "Busca concluída" -Type "Success"
-        
-        # 4. Verificar resultados
+
+        Write-ColorMessage "Search completed." -Type "Success"
+
+        # 4. Check the results
         $itemCount = $searchStatus.Items
-        Write-ColorMessage "4/5 Itens encontrados: $itemCount" -Type "Info"
-        
+        Write-ColorMessage "4/6 Items found: $itemCount" -Type "Info"
+
         if ($itemCount -eq 0) {
-            Write-ColorMessage "Nenhum e-mail encontrado com os critérios especificados" -Type "Warning"
+            Write-ColorMessage "No email matched the criteria." -Type "Warning"
             Remove-ComplianceSearch -Identity $searchName -Confirm:$false
             exit
         }
-        
-        # 5. Executar remoção
-        Write-ColorMessage "5/5 Executando remoção (SoftDelete)..." -Type "Progress"
-        New-ComplianceSearchAction -SearchName $searchName -Purge -PurgeType SoftDelete -Confirm:$false -ErrorAction Stop | Out-Null
-        
+
         Write-Host ""
-        Write-ColorMessage "=== OPERAÇÃO CONCLUÍDA ===" -Type "Success"
+        Write-ColorMessage "Note: one purge removes at most 10 items per mailbox. Re-run if a mailbox has more." -Type "Warning"
+        $confirmPurge = Read-Host "Soft-delete these $itemCount item(s) now? (Y/N)"
+        if ($confirmPurge -notmatch '^[YySs]') {
+            Write-ColorMessage "Purge cancelled. The search '$searchName' was kept for review in Purview." -Type "Warning"
+            exit
+        }
+
+        # 5. Start the purge
+        Write-ColorMessage "5/6 Starting purge (SoftDelete)..." -Type "Progress"
+        $action = New-ComplianceSearchAction -SearchName $searchName -Purge -PurgeType SoftDelete -Confirm:$false -ErrorAction Stop
+        $actionName = if ($action -and $action.Name) { $action.Name } else { "${searchName}_Purge" }
+
+        # 6. Poll the purge until it finishes
+        Write-ColorMessage "6/6 Waiting for the purge action '$actionName' to finish..." -Type "Progress"
+        $final = Wait-PurgeAction -ActionName $actionName -TimeoutMinutes $script:PurgeTimeoutMinutes
+
         Write-Host ""
-        Write-ColorMessage "$itemCount e-mail(s) removido(s) com sucesso" -Type "Success"
-        Write-ColorMessage "E-mails movidos para Itens Recuperáveis (retenção: 30 dias)" -Type "Info"
-        Write-ColorMessage "Nome da busca: $searchName" -Type "Info"
-        
+        if (-not $final) {
+            Write-ColorMessage "Could not read the purge action status. Check it with:" -Type "Warning"
+            Write-Host "  Get-ComplianceSearchAction -Identity '$actionName' | Format-List Status,Results,Errors" -ForegroundColor Gray
+        } elseif ($final.Status -eq 'Completed') {
+            Write-ColorMessage "=== PURGE COMPLETED ===" -Type "Success"
+            Write-ColorMessage "Search hits: $itemCount item(s)." -Type "Info"
+            if ($final.Results) { Write-ColorMessage "Purge results: $($final.Results)" -Type "Info" }
+            Write-ColorMessage "Items were moved to Recoverable Items (recoverable during the deleted item retention period)." -Type "Info"
+            Write-ColorMessage "Search name: $searchName" -Type "Info"
+            Write-ColorMessage "If any mailbox had more than 10 matching items, run the script again to remove the rest." -Type "Warning"
+        } elseif ($final.Status -in @('Failed', 'PartiallySucceeded')) {
+            Write-ColorMessage "Purge finished with status '$($final.Status)'." -Type "Error"
+            if ($final.Results) { Write-Host "  Results: $($final.Results)" -ForegroundColor Gray }
+            if ($final.Errors)  { Write-Host "  Errors : $($final.Errors)"  -ForegroundColor Gray }
+        } else {
+            Write-ColorMessage "Purge still '$($final.Status)' after $($script:PurgeTimeoutMinutes) minutes. It keeps running in the background." -Type "Warning"
+            Write-Host "  Check later: Get-ComplianceSearchAction -Identity '$actionName' | Format-List Status,Results,Errors" -ForegroundColor Gray
+        }
+
     } catch {
         Write-Host ""
-        Write-ColorMessage "ERRO: $($_.Exception.Message)" -Type "Error"
-        
+        Write-ColorMessage "ERROR: $($_.Exception.Message)" -Type "Error"
+
         # Cleanup
         try {
             if (Get-ComplianceSearch -Identity $searchName -ErrorAction SilentlyContinue) {
                 Remove-ComplianceSearch -Identity $searchName -Confirm:$false -ErrorAction SilentlyContinue
-                Write-ColorMessage "Busca de teste removida" -Type "Info"
+                Write-ColorMessage "Search removed." -Type "Info"
             }
         } catch {}
     }
 }
 
-# ===== EXECUÇÃO PRINCIPAL =====
+# ===== MAIN =====
 Clear-Host
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║          REMOÇÃO DE E-MAILS - MICROSOFT 365                  ║" -ForegroundColor Cyan
-Write-Host "║          Script com Auto-Configuração v3.1                   ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "          EMAIL REMOVAL - MICROSOFT 365 (Purview purge)          " -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host ""
 
 try {
-    # Etapa 1: Verificar/Instalar módulo
-    Install-RequiredModule
-    
-    # Etapa 2: Conectar aos serviços
+    # Step 1: check the module
+    Test-RequiredModule
+
+    # Step 2: connect
     Connect-M365Services
-    
-    # Etapa 3: Executar remoção
+
+    # Step 3: search and purge
     Remove-EmailBySearch
-    
+
 } catch {
-    Write-ColorMessage "Erro fatal: $($_.Exception.Message)" -Type "Error"
+    Write-ColorMessage "Fatal error: $($_.Exception.Message)" -Type "Error"
 }
 
 Write-Host ""
-$null = Read-Host "Pressione ENTER para sair"
+$null = Read-Host "Press ENTER to exit"

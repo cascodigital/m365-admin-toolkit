@@ -24,6 +24,12 @@
     - Windows itself
     - System-wide Azure AD join state
     - User documents
+    - Outlook data files (.pst): if any .pst file is found under the Outlook
+      AppData folders, that folder is skipped and a warning is shown. Move the
+      .pst files elsewhere and run the script again to clean that folder.
+
+    Registry backups (OneDrive and Office 16.0 HKCU keys) are exported before any
+    change to a timestamped folder under -BackupPath.
 
 .PARAMETER ExtraCredentialPattern
     Optional extra regex pattern used to delete Credential Manager targets,
@@ -31,6 +37,10 @@
 
 .PARAMETER SkipOneDriveReset
     Do not run OneDrive.exe /reset at the end.
+
+.PARAMETER BackupPath
+    Folder where the registry backup folder is created. Defaults to the script
+    folder; falls back to $env:TEMP if that folder is not writable.
 
 .EXAMPLE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Reset-OfficeTenantCache.ps1
@@ -42,7 +52,6 @@
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Reset-OfficeTenantCache.ps1 -WhatIf
 
 .NOTES
-    Author: Casco Digital
     Compatibility: Windows PowerShell 5.1+, Windows 10/11
 
     Recommended flow:
@@ -56,7 +65,8 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$ExtraCredentialPattern,
-    [switch]$SkipOneDriveReset
+    [switch]$SkipOneDriveReset,
+    [string]$BackupPath
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -67,6 +77,32 @@ function Write-Step {
     Write-Host $Message -ForegroundColor Cyan
 }
 
+# Removes a file system path or registry key and reports the real outcome.
+function Remove-ItemReported {
+    param(
+        [string]$Path,
+        [string]$Kind
+    )
+
+    if (-not $PSCmdlet.ShouldProcess($Path, "Remove $Kind")) {
+        return
+    }
+
+    try {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        # Reported below based on what is left
+    }
+
+    if (Test-Path -LiteralPath $Path) {
+        Write-Host "  - Could not fully remove $Kind (in use or access denied): $Path" -ForegroundColor DarkYellow
+    }
+    else {
+        Write-Host "  - Removed ${Kind}: $Path" -ForegroundColor Gray
+    }
+}
+
 function Remove-PathSafe {
     param([string]$Path)
 
@@ -75,10 +111,7 @@ function Remove-PathSafe {
     }
 
     if (Test-Path -LiteralPath $Path) {
-        if ($PSCmdlet.ShouldProcess($Path, "Remove path")) {
-            Remove-Item -LiteralPath $Path -Recurse -Force
-        }
-        Write-Host "  - Removed path: $Path" -ForegroundColor Gray
+        Remove-ItemReported -Path $Path -Kind "path"
     }
 }
 
@@ -91,10 +124,7 @@ function Remove-PathPatternSafe {
 
     $items = Get-Item -Path $Path
     foreach ($item in $items) {
-        if ($PSCmdlet.ShouldProcess($item.FullName, "Remove path")) {
-            Remove-Item -LiteralPath $item.FullName -Recurse -Force
-        }
-        Write-Host "  - Removed path: $($item.FullName)" -ForegroundColor Gray
+        Remove-ItemReported -Path $item.FullName -Kind "path"
     }
 }
 
@@ -102,11 +132,34 @@ function Remove-RegistryKeySafe {
     param([string]$Path)
 
     if (Test-Path -LiteralPath $Path) {
-        if ($PSCmdlet.ShouldProcess($Path, "Remove registry key")) {
-            Remove-Item -LiteralPath $Path -Recurse -Force
-        }
-        Write-Host "  - Removed registry key: $Path" -ForegroundColor Gray
+        Remove-ItemReported -Path $Path -Kind "registry key"
     }
+}
+
+# Returns the first writable folder: the requested path, the script folder, or $env:TEMP.
+function Resolve-BackupRoot {
+    param([string]$Path)
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($Path)) { $candidates += $Path }
+    elseif ($PSScriptRoot) { $candidates += $PSScriptRoot }
+    $candidates += $env:TEMP
+
+    foreach ($candidate in $candidates) {
+        try {
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                New-Item -ItemType Directory -Path $candidate -Force -ErrorAction Stop -WhatIf:$false | Out-Null
+            }
+            $probe = Join-Path -Path $candidate -ChildPath (".write_test_{0}.tmp" -f [guid]::NewGuid())
+            [System.IO.File]::WriteAllText($probe, '')
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue -WhatIf:$false
+            return $candidate
+        }
+        catch {
+            Write-Host "  - Backup location not writable: $candidate" -ForegroundColor DarkYellow
+        }
+    }
+    return $env:TEMP
 }
 
 Write-Host "==== RESET OFFICE / OUTLOOK / ONEDRIVE TENANT CACHE ====" -ForegroundColor Yellow
@@ -147,21 +200,29 @@ Start-Sleep -Seconds 3
 
 Write-Step "[2/7] Exporting HKCU registry backups..."
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$backupDir = Join-Path $env:USERPROFILE "Desktop\office-tenant-cache-backup-$timestamp"
+$backupRoot = Resolve-BackupRoot -Path $BackupPath
+$backupDir = Join-Path $backupRoot "office-tenant-cache-backup-$timestamp"
 
 if ($PSCmdlet.ShouldProcess($backupDir, "Create backup directory")) {
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-}
 
-if ($PSCmdlet.ShouldProcess("HKCU\Software\Microsoft\OneDrive", "Export registry backup")) {
-    reg export "HKCU\Software\Microsoft\OneDrive" (Join-Path $backupDir "onedrive-hkcu.reg") /y | Out-Null
-}
+    $registryBackups = @(
+        @{ Key = "HKCU\Software\Microsoft\OneDrive";     File = "onedrive-hkcu.reg" },
+        @{ Key = "HKCU\Software\Microsoft\Office\16.0"; File = "office16-hkcu.reg" }
+    )
 
-if ($PSCmdlet.ShouldProcess("HKCU\Software\Microsoft\Office\16.0", "Export registry backup")) {
-    reg export "HKCU\Software\Microsoft\Office\16.0" (Join-Path $backupDir "office16-hkcu.reg") /y | Out-Null
-}
+    foreach ($backup in $registryBackups) {
+        reg export $backup.Key (Join-Path $backupDir $backup.File) /y 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  - Exported $($backup.Key) to $($backup.File)" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  - Could not export $($backup.Key) (key may not exist)" -ForegroundColor DarkYellow
+        }
+    }
 
-Write-Host "  - Backup folder: $backupDir" -ForegroundColor Gray
+    Write-Host "  - Backup folder: $backupDir" -ForegroundColor Gray
+}
 
 Write-Step "[3/7] Removing OneDrive Business account and tenant cache..."
 $oneDriveRegistryKeys = @(
@@ -214,7 +275,24 @@ $officePaths = @(
     "$env:LOCALAPPDATA\Microsoft\Office\16.0\OfficeFileCache"
 )
 
+$outlookDataFolders = @(
+    "$env:LOCALAPPDATA\Microsoft\Outlook",
+    "$env:APPDATA\Microsoft\Outlook"
+)
+
 foreach ($path in $officePaths) {
+    if (($outlookDataFolders -contains $path) -and (Test-Path -LiteralPath $path)) {
+        $pstFiles = @(Get-ChildItem -LiteralPath $path -Filter "*.pst" -File -Recurse -Force)
+        if ($pstFiles.Count -gt 0) {
+            Write-Host "  - SKIPPED $path : it contains $($pstFiles.Count) Outlook data file(s) (.pst):" -ForegroundColor Red
+            foreach ($pst in $pstFiles) {
+                Write-Host "      $($pst.FullName)" -ForegroundColor Red
+            }
+            Write-Host "    Move the .pst file(s) to another folder and run the script again to clean this folder." -ForegroundColor Red
+            continue
+        }
+    }
+
     Remove-PathSafe -Path $path
 }
 
@@ -241,9 +319,14 @@ $credentialTargets = (cmdkey /list) |
 
 foreach ($target in $credentialTargets) {
     if ($PSCmdlet.ShouldProcess($target, "Delete Credential Manager target")) {
-        cmdkey /delete:$target | Out-Null
+        cmdkey /delete:$target 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  - Deleted credential: $target" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  - Could not delete credential: $target" -ForegroundColor DarkYellow
+        }
     }
-    Write-Host "  - Deleted credential: $target" -ForegroundColor Gray
 }
 
 Write-Step "[7/7] Resetting OneDrive..."
@@ -252,8 +335,8 @@ if (-not $SkipOneDriveReset) {
     if ($oneDriveExe) {
         if ($PSCmdlet.ShouldProcess($oneDriveExe, "Run OneDrive reset")) {
             & $oneDriveExe /reset
+            Write-Host "  - OneDrive reset requested: $oneDriveExe" -ForegroundColor Gray
         }
-        Write-Host "  - OneDrive reset requested: $oneDriveExe" -ForegroundColor Gray
     } else {
         Write-Host "  - OneDrive.exe not found; skipped reset." -ForegroundColor DarkYellow
     }

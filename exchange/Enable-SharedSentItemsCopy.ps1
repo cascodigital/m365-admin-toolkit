@@ -1,72 +1,87 @@
 <#
 .SYNOPSIS
-    Faz a shared mailbox guardar no proprio Sent Items o que e enviado como ela.
+    Makes a shared mailbox keep a copy of mail sent as / on behalf of it in its own Sent Items.
+
 .DESCRIPTION
-    Liga MessageCopyForSentAsEnabled e MessageCopyForSendOnBehalfEnabled. Sem isso,
-    o email enviado "como" a shared so aparece no Sent Items de quem enviou.
-    Recusa se o alvo nao for SharedMailbox. Grava CSV de verificacao antes/depois.
-    SIMULA POR PADRAO; aplica so com a chave EXECUTAR.
+    Turns on MessageCopyForSentAsEnabled and MessageCopyForSendOnBehalfEnabled. Without them,
+    a message sent "as" the shared mailbox only shows up in the sender's own Sent Items.
+    Refuses to run if the target is not a SharedMailbox. Writes a BEFORE/AFTER verification CSV.
+
+    SIMULATES BY DEFAULT. It only applies the change when the global APPLY key is set
+    in the same command line (see examples). The key is consumed on every run.
+
 .PARAMETER Mailbox
-    Endereco da shared mailbox.
+    Address of the shared mailbox. If omitted, the $DefaultTarget placeholder at the top
+    of the script is used (edit it, or pass -Mailbox).
+
 .EXAMPLE
-    .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@contoso.com
-    Simula.
+    .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@domain.com
+    Simulates.
+
 .EXAMPLE
-    $global:EXECUTAR = $true; .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@contoso.com
-    Aplica.
+    $global:APPLY = $true; .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@domain.com
+    Applies.
+
 .NOTES
-    Requer sessao do Exchange Online ja conectada (Connect-ExchangeOnline).
-    Rollback: Set-Mailbox <shared> -MessageCopyForSentAsEnabled $false -MessageCopyForSendOnBehalfEnabled $false
-    Autor: Andre Kittler da Costa
+    IMPACT  : turns on the Sent Items copy for Send As and Send on Behalf. 1 mailbox. Reversible.
+    ROLLBACK: Set-Mailbox <shared> -MessageCopyForSentAsEnabled $false -MessageCopyForSendOnBehalfEnabled $false
+    Requires an already connected Exchange Online session (Connect-ExchangeOnline).
+    The legacy key $global:EXECUTAR is still accepted as an alias of $global:APPLY.
+    CSV output goes to the 'csv' subfolder next to the script ($env:TEMP if not writable).
 #>
-# IMPACTO: liga copia no Sent Items da shared para Send As e Send on Behalf. 1 mailbox. Reversivel.
-# ALVO: a shared mailbox passada em -Mailbox
-# ROLLBACK: Set-Mailbox <shared> -MessageCopyForSentAsEnabled $false -MessageCopyForSendOnBehalfEnabled $false
+param([string]$Mailbox)
 
-# ---------- PREAMBULO DE SEGURANCA ----------
-# Este script SIMULA por padrao. Para APLICAR, rode tudo num comando so:
-#     $global:EXECUTAR = $true; .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@contoso.com
-param([Parameter(Mandatory = $true)][string]$Mailbox)
+# ---------- TARGET (placeholder) ----------
+$DefaultTarget = 'SHARED@DOMAIN.COM'   # <<< edit, or pass -Mailbox
 
-$Execute = $false                 # <<< FALHA FECHADA: NUNCA remover esta linha
-$__k = Get-Variable EXECUTAR -Scope Global -ValueOnly -ErrorAction SilentlyContinue
-$Execute = ($__k -is [bool] -and $__k)
-$global:EXECUTAR = $false         # consome a chave
+# ---------- SAFETY PREAMBLE ----------
+# This script SIMULATES by default. To APPLY, run everything in a single command:
+#     $global:APPLY = $true; .\Enable-SharedSentItemsCopy.ps1 -Mailbox shared@domain.com
+$Execute = $false                 # <<< FAIL CLOSED: NEVER remove this line
+$__k  = Get-Variable APPLY    -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+$__k2 = Get-Variable EXECUTAR -Scope Global -ValueOnly -ErrorAction SilentlyContinue   # legacy key name
+$Execute = (($__k -is [bool] -and $__k) -or ($__k2 -is [bool] -and $__k2))
+$global:APPLY = $false            # consumes the key
+$global:EXECUTAR = $false
 
-$saida = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
-try { $__p = Join-Path $saida "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
-catch { $saida = $env:TEMP; Write-Host "AVISO: saida redirecionada para $saida" -Foreground Yellow }
+$__root = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+$csvDir = Join-Path $__root 'csv'   # CSV always in the csv subfolder next to the script, even if the script is moved
+if ((-not (Test-Path $csvDir)) -and (Test-Path (Join-Path (Split-Path $__root) 'csv'))) { $csvDir = Join-Path (Split-Path $__root) 'csv' }   # script in a subfolder: use the csv folder of the parent
+try { if (-not (Test-Path $csvDir)) { $null = New-Item -ItemType Directory -Path $csvDir -ErrorAction Stop } } catch {}
+try { $__p = Join-Path $csvDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $csvDir = $env:TEMP; Write-Host "WARNING: CSV output redirected to $csvDir" -Foreground Yellow }
 
-$alvo   = $Mailbox
-$campos = 'Name','PrimarySmtpAddress','RecipientTypeDetails','MessageCopyForSentAsEnabled','MessageCopyForSendOnBehalfEnabled'
+$target = if ($Mailbox) { $Mailbox } else { $DefaultTarget }
+if ($target -eq 'SHARED@DOMAIN.COM') { throw "STOP: set -Mailbox (or edit `$DefaultTarget) - the placeholder is still in place." }
+$fields = 'Name','PrimarySmtpAddress','RecipientTypeDetails','MessageCopyForSentAsEnabled','MessageCopyForSendOnBehalfEnabled'
 
-$antes = Get-Mailbox -Identity $alvo -ErrorAction Stop | Select-Object $campos
-Write-Host "ALVOS: $(@($antes).Count)" -Foreground Cyan
-if ($antes.RecipientTypeDetails -ne 'SharedMailbox') { throw "PARE: $alvo nao e SharedMailbox ($($antes.RecipientTypeDetails))" }
+$before = Get-Mailbox -Identity $target -ErrorAction Stop | Select-Object $fields
+Write-Host "TARGETS: $(@($before).Count)" -Foreground Cyan
+if ($before.RecipientTypeDetails -ne 'SharedMailbox') { throw "STOP: $target is not a SharedMailbox ($($before.RecipientTypeDetails))" }
 
-$p = @{ Identity = $alvo; MessageCopyForSentAsEnabled = $true; MessageCopyForSendOnBehalfEnabled = $true; ErrorAction = 'Stop' }
+$p = @{ Identity = $target; MessageCopyForSentAsEnabled = $true; MessageCopyForSendOnBehalfEnabled = $true; ErrorAction = 'Stop' }
 if ($Execute) {
-    try { Set-Mailbox @p } catch { Write-Host "FALHOU: $($_.Exception.Message)" -Foreground Red }
+    try { Set-Mailbox @p } catch { Write-Host "FAILED: $($_.Exception.Message)" -Foreground Red }
 } else {
-    Write-Host "SIMULACAO: Set-Mailbox $(($p.GetEnumerator() | Sort-Object Key | ForEach-Object { "-$($_.Key) '$($_.Value)'" }) -join ' ')"
+    Write-Host "SIMULATION: Set-Mailbox $(($p.GetEnumerator() | Sort-Object Key | ForEach-Object { "-$($_.Key) '$($_.Value)'" }) -join ' ')"
 }
 
-# ============ VERIFICACAO - ULTIMO BLOCO, NADA DEPOIS ============
-if (-not $antes) { Write-Host "ATENCAO: `$antes VAZIO - esta tabela NAO e uma verificacao" -Foreground Red }
-$depois = Get-Mailbox -Identity $alvo | Select-Object $campos
+# ============ VERIFICATION - LAST BLOCK, NOTHING AFTER ============
+if (-not $before) { Write-Host "ATTENTION: `$before EMPTY - this table is NOT a verification" -Foreground Red }
+$after = Get-Mailbox -Identity $target | Select-Object $fields
 $tab = @(
-  $antes  | Select-Object @{n='Fase';e={'ANTES' }},*
-  $depois | Select-Object @{n='Fase';e={'DEPOIS'}},*
+  $before | Select-Object @{n='Phase';e={'BEFORE'}},*
+  $after  | Select-Object @{n='Phase';e={'AFTER' }},*
 )
 Write-Host ""
 if (-not $Execute) {
-    Write-Host '### MODO SIMULACAO - NADA FOI ALTERADO ###' -Foreground Yellow
-    Write-Host '### Rode  $global:EXECUTAR = $true; .\Enable-SharedSentItemsCopy.ps1  p/ aplicar ###' -Foreground Yellow
+    Write-Host '### SIMULATION MODE - NOTHING WAS CHANGED ###' -Foreground Yellow
+    Write-Host '### Run  $global:APPLY = $true; .\Enable-SharedSentItemsCopy.ps1 -Mailbox <shared>  to apply ###' -Foreground Yellow
 } else {
-    Write-Host '### APLICADO - confira ANTES x DEPOIS ###' -Foreground Green
+    Write-Host '### APPLIED - check BEFORE vs AFTER ###' -Foreground Green
 }
 $tab | Format-Table -AutoSize
-$csv = Join-Path $saida "verificacao-sentcopy-$(Get-Date -f yyyyMMdd-HHmmss).csv"
+$csv = Join-Path $csvDir "verification-shared-sentcopy-$(Get-Date -f yyyyMMdd-HHmmss).csv"
 $tab | Export-Csv $csv -NoTypeInformation -Encoding UTF8
-if (Test-Path $csv) { Write-Host "Resumo salvo em: $csv" }
-else { Write-Host "ATENCAO: o CSV NAO foi gravado" -Foreground Red }
+if (Test-Path $csv) { Write-Host "Summary saved to: $csv" }
+else { Write-Host "ATTENTION: the CSV was NOT written" -Foreground Red }

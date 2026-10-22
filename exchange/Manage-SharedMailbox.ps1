@@ -1,22 +1,27 @@
 <#
 .SYNOPSIS
-    Gerencia acesso a caixa de correio compartilhada no Exchange Online.
+    Manages access to a shared mailbox in Exchange Online.
 
 .DESCRIPTION
-    Conecta ao EXO com a conta admin informada, pergunta qual a shared mailbox,
-    lista quem tem Full Access / Send As / Send on Behalf, e oferece menu para
-    adicionar (ou remover) usuarios em qualquer uma das tres permissoes.
+    Connects to EXO with the admin account, asks which shared mailbox,
+    lists who has Full Access / Send As / Send on Behalf, and offers a menu to
+    add (or remove) users in any of the three permissions.
 
-    PRE-REQUISITO: PIM "Exchange Recipient Administrator" ATIVO.
-    Sem PIM, o EXO mente e diz que a mailbox nao existe.
+    PREREQUISITE: the "Exchange Recipient Administrator" role ACTIVE (via PIM, if used).
+    Without it, EXO misleadingly says the mailbox does not exist.
 
-.NOTES
-    Autor: Andre Kittler da Costa
+.PARAMETER AdminUPN
+    Admin account used to connect to Exchange Online if no session is active.
+
+.PARAMETER SharedMailbox
+    Optional. Shared mailbox address; if omitted, the script prompts for it.
+
 .EXAMPLE
-    .\Manage-SharedMailbox.ps1 -AdminUPN admin@contoso.com
-    Pergunta a shared e abre o menu.
+    .\Manage-SharedMailbox.ps1 -AdminUPN ADMIN@DOMAIN.COM
+    Prompts for the shared mailbox and opens the menu.
+
 .EXAMPLE
-    .\Manage-SharedMailbox.ps1 -AdminUPN admin@contoso.com -SharedMailbox financeiro@contoso.com
+    .\Manage-SharedMailbox.ps1 -AdminUPN ADMIN@DOMAIN.COM -SharedMailbox finance@domain.com
 #>
 
 [CmdletBinding()]
@@ -46,7 +51,7 @@ function Connect-EXOIfNeeded {
     param([string]$UPN)
 
     if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-        throw "Modulo ExchangeOnlineManagement nao instalado. Rode: Install-Module ExchangeOnlineManagement -Scope CurrentUser"
+        throw "ExchangeOnlineManagement module not installed. Run: Install-Module ExchangeOnlineManagement -Scope CurrentUser"
     }
     Import-Module ExchangeOnlineManagement -ErrorAction Stop
 
@@ -54,16 +59,16 @@ function Connect-EXOIfNeeded {
             Where-Object { $_.State -eq 'Connected' }
 
     if ($conn) {
-        Write-Ok "Ja conectado ao EXO como $($conn[0].UserPrincipalName)"
+        Write-Ok "Already connected to EXO as $($conn[0].UserPrincipalName)"
         return
     }
 
-    Write-Info "Conectando ao Exchange Online como $UPN ..."
+    Write-Info "Connecting to Exchange Online as $UPN ..."
     Connect-ExchangeOnline -UserPrincipalName $UPN -ShowBanner:$false
-    Write-Ok "Conectado."
+    Write-Ok "Connected."
 }
 
-# Resolve qualquer coisa (email, alias, nome) para um objeto de recipient
+# Resolves anything (email, alias, name) to a recipient object
 function Resolve-Recipient {
     param(
         [Parameter(Mandatory)][string]$Identity,
@@ -87,21 +92,21 @@ function Resolve-Recipient {
 
     $r = @($r)
     if ($r.Count -eq 0) {
-        Write-Err "Nada encontrado para '$Identity'. (Se TUDO esta dando not found -> PIM expirado.)"
+        Write-Err "Nothing found for '$Identity'. (If EVERYTHING returns not found -> your admin role / PIM activation expired.)"
         return $null
     }
 
     if ($r.Count -gt 1) {
-        Write-Warn "Mais de um resultado para '$Identity':"
+        Write-Warn "More than one result for '$Identity':"
         for ($i = 0; $i -lt $r.Count; $i++) {
             "{0,3}) {1,-38} {2,-45} {3}" -f ($i + 1), $r[$i].DisplayName, $r[$i].PrimarySmtpAddress, $r[$i].RecipientTypeDetails |
                 Write-Host
         }
-        $pick = Read-Host "Escolha o numero (Enter = cancelar)"
+        $pick = Read-Host "Choose the number (Enter = cancel)"
         if ([string]::IsNullOrWhiteSpace($pick)) { return $null }
         $idx = 0
         if (-not [int]::TryParse($pick, [ref]$idx) -or $idx -lt 1 -or $idx -gt $r.Count) {
-            Write-Err "Escolha invalida."
+            Write-Err "Invalid choice."
             return $null
         }
         $r = $r[$idx - 1]
@@ -110,7 +115,7 @@ function Resolve-Recipient {
     }
 
     if ($MailboxOnly -and $r.RecipientTypeDetails -notlike '*Mailbox*') {
-        Write-Err "'$($r.PrimarySmtpAddress)' e um $($r.RecipientTypeDetails), nao uma mailbox."
+        Write-Err "'$($r.PrimarySmtpAddress)' is a $($r.RecipientTypeDetails), not a mailbox."
         return $null
     }
 
@@ -119,10 +124,10 @@ function Resolve-Recipient {
 
 #endregion
 
-#region ---------- Leitura de permissoes ----------
+#region ---------- Reading permissions ----------
 
-# Os cmdlets REST do EXO V3 devolvem booleanos ora como [bool], ora como a string
-# "False" -- e no PowerShell qualquer string nao-vazia e truthy. Normaliza aqui.
+# The EXO V3 REST cmdlets return booleans sometimes as [bool], sometimes as the string
+# "False" -- and in PowerShell any non-empty string is truthy. Normalize here.
 function ConvertTo-Bool {
     param($Value)
     if ($null -eq $Value)      { return $false }
@@ -180,12 +185,12 @@ function Show-SharedMailboxAccess {
 
     $mbx = $Access.Mailbox
 
-    Write-Head "CAIXA: $($mbx.DisplayName)  <$($mbx.PrimarySmtpAddress)>   [$($mbx.RecipientTypeDetails)]"
+    Write-Head "MAILBOX: $($mbx.DisplayName)  <$($mbx.PrimarySmtpAddress)>   [$($mbx.RecipientTypeDetails)]"
 
     Write-Host ''
-    Write-Host '--- FULL ACCESS (abrir a caixa) ---' -ForegroundColor White
+    Write-Host '--- FULL ACCESS (open the mailbox) ---' -ForegroundColor White
     if ($Access.FullAccess.Count -eq 0) {
-        Write-Host '    (ninguem)' -ForegroundColor DarkGray
+        Write-Host '    (nobody)' -ForegroundColor DarkGray
     } else {
         $Access.FullAccess | ForEach-Object {
             if ($_.Deny) {
@@ -197,9 +202,9 @@ function Show-SharedMailboxAccess {
     }
 
     Write-Host ''
-    Write-Host '--- SEND AS (envia COMO a caixa) ---' -ForegroundColor White
+    Write-Host '--- SEND AS (sends AS the mailbox) ---' -ForegroundColor White
     if ($Access.SendAs.Count -eq 0) {
-        Write-Host '    (ninguem)' -ForegroundColor DarkGray
+        Write-Host '    (nobody)' -ForegroundColor DarkGray
     } else {
         $Access.SendAs | ForEach-Object {
             if ($_.Deny) {
@@ -211,9 +216,9 @@ function Show-SharedMailboxAccess {
     }
 
     Write-Host ''
-    Write-Host '--- SEND ON BEHALF (envia EM NOME DE) ---' -ForegroundColor White
+    Write-Host '--- SEND ON BEHALF (sends ON BEHALF OF) ---' -ForegroundColor White
     if ($Access.SendOnBehalf.Count -eq 0) {
-        Write-Host '    (ninguem)' -ForegroundColor DarkGray
+        Write-Host '    (nobody)' -ForegroundColor DarkGray
     } else {
         $Access.SendOnBehalf | ForEach-Object {
             Write-Host ("    - {0}" -f $_.User) -ForegroundColor Gray
@@ -224,7 +229,7 @@ function Show-SharedMailboxAccess {
 
 #endregion
 
-#region ---------- Escrita de permissoes ----------
+#region ---------- Writing permissions ----------
 
 function Add-FullAccess {
     param($Mailbox, $User, [bool]$AutoMapping = $true)
@@ -235,9 +240,9 @@ function Add-FullAccess {
                               -InheritanceType All `
                               -AutoMapping:$AutoMapping `
                               -Confirm:$false -ErrorAction Stop | Out-Null
-        Write-Ok "Full Access concedido a $($User.PrimarySmtpAddress) (AutoMapping: $AutoMapping)"
+        Write-Ok "Full Access granted to $($User.PrimarySmtpAddress) (AutoMapping: $AutoMapping)"
     } catch {
-        Write-Err "Full Access falhou: $($_.Exception.Message)"
+        Write-Err "Full Access failed: $($_.Exception.Message)"
     }
 }
 
@@ -248,9 +253,9 @@ function Add-SendAs {
                                 -Trustee $User.Identity `
                                 -AccessRights SendAs `
                                 -Confirm:$false -ErrorAction Stop | Out-Null
-        Write-Ok "Send As concedido a $($User.PrimarySmtpAddress)"
+        Write-Ok "Send As granted to $($User.PrimarySmtpAddress)"
     } catch {
-        Write-Err "Send As falhou: $($_.Exception.Message)"
+        Write-Err "Send As failed: $($_.Exception.Message)"
     }
 }
 
@@ -260,9 +265,9 @@ function Add-SendOnBehalf {
         Set-Mailbox -Identity $Mailbox.Identity `
                     -GrantSendOnBehalfTo @{Add = $User.Identity} `
                     -Confirm:$false -ErrorAction Stop
-        Write-Ok "Send on Behalf concedido a $($User.PrimarySmtpAddress)"
+        Write-Ok "Send on Behalf granted to $($User.PrimarySmtpAddress)"
     } catch {
-        Write-Err "Send on Behalf falhou: $($_.Exception.Message)"
+        Write-Err "Send on Behalf failed: $($_.Exception.Message)"
     }
 }
 
@@ -273,43 +278,43 @@ function Remove-AnyAccess {
             'Full' {
                 Remove-MailboxPermission -Identity $Mailbox.Identity -User $User.Identity `
                     -AccessRights FullAccess -InheritanceType All -Confirm:$false -ErrorAction Stop | Out-Null
-                Write-Ok "Full Access removido de $($User.PrimarySmtpAddress)"
+                Write-Ok "Full Access removed from $($User.PrimarySmtpAddress)"
             }
             'SendAs' {
                 Remove-RecipientPermission -Identity $Mailbox.Identity -Trustee $User.Identity `
                     -AccessRights SendAs -Confirm:$false -ErrorAction Stop | Out-Null
-                Write-Ok "Send As removido de $($User.PrimarySmtpAddress)"
+                Write-Ok "Send As removed from $($User.PrimarySmtpAddress)"
             }
             'OnBehalf' {
                 Set-Mailbox -Identity $Mailbox.Identity `
                     -GrantSendOnBehalfTo @{Remove = $User.Identity} -Confirm:$false -ErrorAction Stop
-                Write-Ok "Send on Behalf removido de $($User.PrimarySmtpAddress)"
+                Write-Ok "Send on Behalf removed from $($User.PrimarySmtpAddress)"
             }
         }
     } catch {
-        Write-Err "Remocao falhou: $($_.Exception.Message)"
+        Write-Err "Removal failed: $($_.Exception.Message)"
     }
 }
 
-# Pergunta o extra depois de adicionar Full Access
+# Asks about the extra rights after adding Full Access
 function Invoke-SendRightsPrompt {
     param($Mailbox, $User)
 
     Write-Host ''
-    Write-Host "Voce quer que $($User.PrimarySmtpAddress) tambem possa ENVIAR?" -ForegroundColor Yellow
-    Write-Host '   1) Send As        - o email sai COMO a caixa compartilhada'
-    Write-Host '   2) Send on Behalf - sai como "Fulano em nome de Caixa"'
-    Write-Host '   3) Os dois       - NAO recomendado: quando o user tem os dois,'
-    Write-Host '                      o Send As ganha e o on-behalf nunca e usado'
-    Write-Host '   4) Nenhum (so Full Access)'
-    $opt = Read-Host 'Opcao [4]'
+    Write-Host "Do you want $($User.PrimarySmtpAddress) to also be able to SEND?" -ForegroundColor Yellow
+    Write-Host '   1) Send As        - the email goes out AS the shared mailbox'
+    Write-Host '   2) Send on Behalf - goes out as "John Doe on behalf of Mailbox"'
+    Write-Host '   3) Both          - NOT recommended: when the user has both,'
+    Write-Host '                      Send As wins and on-behalf is never used'
+    Write-Host '   4) None (Full Access only)'
+    $opt = Read-Host 'Option [4]'
 
     switch ($opt) {
         '1' { Add-SendAs        -Mailbox $Mailbox -User $User }
         '2' { Add-SendOnBehalf  -Mailbox $Mailbox -User $User }
         '3' { Add-SendAs        -Mailbox $Mailbox -User $User
               Add-SendOnBehalf  -Mailbox $Mailbox -User $User }
-        default { Write-Info 'Nenhuma permissao de envio adicionada.' }
+        default { Write-Info 'No send permission added.' }
     }
 }
 
@@ -317,19 +322,19 @@ function Invoke-SendRightsPrompt {
 
 #region ---------- Main ----------
 
-Write-Head 'GERENCIADOR DE CAIXA COMPARTILHADA - EXCHANGE ONLINE'
-Write-Warn 'Requer PIM "Exchange Recipient Administrator" ATIVO. Sem ele, o EXO diz que a caixa nao existe.'
+Write-Head 'SHARED MAILBOX MANAGER - EXCHANGE ONLINE'
+Write-Warn 'Requires the "Exchange Recipient Administrator" role ACTIVE. Without it, EXO says the mailbox does not exist.'
 
 Connect-EXOIfNeeded -UPN $AdminUPN
 
-# ---- Qual caixa? (sem assumir dominio nenhum) ----
+# ---- Which mailbox? (without assuming any domain) ----
 $mbxObj = $null
 while (-not $mbxObj) {
     if ([string]::IsNullOrWhiteSpace($SharedMailbox)) {
-        $SharedMailbox = Read-Host "`nDigite o e-mail COMPLETO da caixa compartilhada (Enter vazio = sair)"
+        $SharedMailbox = Read-Host "`nEnter the FULL email address of the shared mailbox (empty Enter = exit)"
     }
     if ([string]::IsNullOrWhiteSpace($SharedMailbox)) {
-        Write-Info 'Saindo.'
+        Write-Info 'Exiting.'
         return
     }
     $mbxObj = Resolve-Recipient -Identity $SharedMailbox.Trim() -MailboxOnly
@@ -342,33 +347,33 @@ Show-SharedMailboxAccess -Access $access
 # ---- Menu ----
 do {
     Write-Host ''
-    Write-Host '--------------------- O QUE VOCE QUER FAZER? ---------------------' -ForegroundColor Cyan
-    Write-Host '   1) Adicionar usuario com FULL ACCESS (e depois pergunto sobre envio)'
-    Write-Host '   2) Adicionar SOMENTE Send As'
-    Write-Host '   3) Adicionar SOMENTE Send on Behalf'
-    Write-Host '   4) Remover permissao de um usuario'
-    Write-Host '   5) Reexibir a lista de acesso'
-    Write-Host '   6) Trocar de caixa compartilhada'
-    Write-Host '   0) Sair'
-    $choice = Read-Host 'Opcao'
+    Write-Host '--------------------- WHAT DO YOU WANT TO DO? ---------------------' -ForegroundColor Cyan
+    Write-Host '   1) Add user with FULL ACCESS (then I ask about sending)'
+    Write-Host '   2) Add Send As ONLY'
+    Write-Host '   3) Add Send on Behalf ONLY'
+    Write-Host '   4) Remove a permission from a user'
+    Write-Host '   5) Show the access list again'
+    Write-Host '   6) Switch shared mailbox'
+    Write-Host '   0) Exit'
+    $choice = Read-Host 'Option'
 
     switch ($choice) {
 
         '1' {
             do {
-                $u = Read-Host "`nE-mail do usuario a adicionar (Enter = parar)"
+                $u = Read-Host "`nEmail of the user to add (Enter = stop)"
                 if ([string]::IsNullOrWhiteSpace($u)) { break }
 
                 $usr = Resolve-Recipient -Identity $u.Trim()
                 if (-not $usr) { continue }
 
-                $am = Read-Host "AutoMapping (caixa aparece sozinha no Outlook)? [S/n]"
+                $am = Read-Host "AutoMapping (mailbox appears automatically in Outlook)? [Y/n]"
                 $autoMap = -not ($am -match '^[nN]')
 
                 Add-FullAccess -Mailbox $mbxObj -User $usr -AutoMapping $autoMap
                 Invoke-SendRightsPrompt -Mailbox $mbxObj -User $usr
 
-                $more = Read-Host "`nAdicionar OUTRO usuario? [s/N]"
+                $more = Read-Host "`nAdd ANOTHER user? [y/N]"
             } while ($more -match '^[sSyY]')
 
             $access = Get-SharedMailboxAccess -Mailbox $mbxObj
@@ -377,11 +382,11 @@ do {
 
         '2' {
             do {
-                $u = Read-Host "`nE-mail do usuario para Send As (Enter = parar)"
+                $u = Read-Host "`nEmail of the user for Send As (Enter = stop)"
                 if ([string]::IsNullOrWhiteSpace($u)) { break }
                 $usr = Resolve-Recipient -Identity $u.Trim()
                 if ($usr) { Add-SendAs -Mailbox $mbxObj -User $usr }
-                $more = Read-Host "Adicionar outro? [s/N]"
+                $more = Read-Host "Add another? [y/N]"
             } while ($more -match '^[sSyY]')
 
             $access = Get-SharedMailboxAccess -Mailbox $mbxObj
@@ -390,11 +395,11 @@ do {
 
         '3' {
             do {
-                $u = Read-Host "`nE-mail do usuario para Send on Behalf (Enter = parar)"
+                $u = Read-Host "`nEmail of the user for Send on Behalf (Enter = stop)"
                 if ([string]::IsNullOrWhiteSpace($u)) { break }
                 $usr = Resolve-Recipient -Identity $u.Trim()
                 if ($usr) { Add-SendOnBehalf -Mailbox $mbxObj -User $usr }
-                $more = Read-Host "Adicionar outro? [s/N]"
+                $more = Read-Host "Add another? [y/N]"
             } while ($more -match '^[sSyY]')
 
             $access = Get-SharedMailboxAccess -Mailbox $mbxObj
@@ -402,15 +407,15 @@ do {
         }
 
         '4' {
-            $u = Read-Host "`nE-mail do usuario a REMOVER (Enter = cancelar)"
+            $u = Read-Host "`nEmail of the user to REMOVE (Enter = cancel)"
             if (-not [string]::IsNullOrWhiteSpace($u)) {
                 $usr = Resolve-Recipient -Identity $u.Trim()
                 if ($usr) {
                     Write-Host '   1) Full Access'
                     Write-Host '   2) Send As'
                     Write-Host '   3) Send on Behalf'
-                    Write-Host '   4) TODAS'
-                    $k = Read-Host 'Remover qual?'
+                    Write-Host '   4) ALL'
+                    $k = Read-Host 'Remove which?'
                     switch ($k) {
                         '1' { Remove-AnyAccess -Mailbox $mbxObj -User $usr -Kind Full }
                         '2' { Remove-AnyAccess -Mailbox $mbxObj -User $usr -Kind SendAs }
@@ -418,7 +423,7 @@ do {
                         '4' { Remove-AnyAccess -Mailbox $mbxObj -User $usr -Kind Full
                               Remove-AnyAccess -Mailbox $mbxObj -User $usr -Kind SendAs
                               Remove-AnyAccess -Mailbox $mbxObj -User $usr -Kind OnBehalf }
-                        default { Write-Info 'Cancelado.' }
+                        default { Write-Info 'Cancelled.' }
                     }
                     $access = Get-SharedMailboxAccess -Mailbox $mbxObj
                     Show-SharedMailboxAccess -Access $access
@@ -432,9 +437,9 @@ do {
         }
 
         '6' {
-            $novo = Read-Host "`nE-mail da nova caixa compartilhada"
-            if (-not [string]::IsNullOrWhiteSpace($novo)) {
-                $tmp = Resolve-Recipient -Identity $novo.Trim() -MailboxOnly
+            $newMailbox = Read-Host "`nEmail of the new shared mailbox"
+            if (-not [string]::IsNullOrWhiteSpace($newMailbox)) {
+                $tmp = Resolve-Recipient -Identity $newMailbox.Trim() -MailboxOnly
                 if ($tmp) {
                     $mbxObj = $tmp
                     $access = Get-SharedMailboxAccess -Mailbox $mbxObj
@@ -443,9 +448,9 @@ do {
             }
         }
 
-        '0' { Write-Info 'Saindo. A sessao EXO continua aberta (Disconnect-ExchangeOnline se quiser fechar).' }
+        '0' { Write-Info 'Exiting. The EXO session stays open (Disconnect-ExchangeOnline if you want to close it).' }
 
-        default { Write-Warn 'Opcao invalida.' }
+        default { Write-Warn 'Invalid option.' }
     }
 
 } while ($choice -ne '0')

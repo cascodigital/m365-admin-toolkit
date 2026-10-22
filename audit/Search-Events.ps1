@@ -1,183 +1,206 @@
 <#
 .SYNOPSIS
-    Analisador abrangente de logs de eventos Windows com busca multi-ID e exportacao Excel avancada (Local e Remoto)
+    Searches Windows event logs for one or more Event IDs (local or remote) and exports the results to Excel.
 
 .DESCRIPTION
-    Script robusto para analise forense e investigacao de eventos Windows em ambiente corporativo.
-    Realiza busca simultanea de multiplos Event IDs em todos os arquivos de log (.evtx) do sistema,
-    incluindo logs arquivados e rotacionados (apenas local). Suporta consulta remota via WinRM.
-    Exporta resultados estruturados para Excel com abas separadas por tipo de evento.
+    Searches Windows event logs for several Event IDs at once within a date range.
+    Local mode scans every .evtx file in the system log folder, including archived and
+    rotated logs. Remote mode queries the active logs of another computer with
+    Get-WinEvent -ComputerName. Results are exported to Excel with one worksheet per Event ID.
 
-    Funcionalidades principais:
-    - Busca simultanea de multiplos Event IDs com operador OR logico
-    - Modo LOCAL: Varredura completa em todos os logs do sistema incluindo arquivados
-    - Modo REMOTO: Consulta em logs ativos de computador remoto via WinRM
-    - Filtragem precisa por intervalo de datas com timezone UTC
-    - Exportacao Excel multi-aba com agrupamento por Event ID
-    - Extracao completa de propriedades XML dos eventos
-    - Otimizacao de performance com skip de arquivos antigos
-    - Tratamento robusto de arquivos corrompidos ou em uso
+    Main features:
+    - Multiple Event IDs combined with a logical OR
+    - LOCAL mode: scans all .evtx files, including archived logs
+    - REMOTE mode: queries active logs on a remote computer
+    - Date-range filtering (UTC-based XPath)
+    - Multi-worksheet Excel export grouped by Event ID
+    - All EventData properties extracted as columns
+    - Skips .evtx files last written before the start date
+    - Ignores locked or corrupted log files
 
-    Casos de uso tipicos:
-    - Investigacao de incidentes de seguranca
-    - Auditoria de logons e acessos 
-    - Analise de falhas de sistema
-    - Monitoramento de atividades suspeitas
-    - Compliance e relatoria regulatoria
+    Typical uses:
+    - Security incident investigation
+    - Logon and access auditing
+    - System failure analysis
+    - Compliance reporting
 
-.PARAMETER None
-    Script interativo - solicita Event IDs, local/remoto e intervalo de datas durante execucao
+.PARAMETER OutputPath
+    Folder for the report. Defaults to the folder containing this script.
+    If that folder is not writable, $env:TEMP is used instead.
 
 .EXAMPLE
-    .\Analyze-WindowsEventLogs.ps1
-    # Tipo de busca: Local
+    .\Search-Events.ps1
+    # Search type: L
     # Event IDs: 4624,4625,4648
-    # Data inicial: 2024-12-01  
-    # Data final: 2024-12-31
-    # Resultado: Analise completa de logons locais
+    # Start date: 2024-12-01
+    # End date: 2024-12-31
+    # Result: local logon analysis
 
 .EXAMPLE
-    .\Analyze-WindowsEventLogs.ps1
-    # Tipo de busca: Remoto
-    # Nome do computador: SRV-DC01
+    .\Search-Events.ps1 -OutputPath D:\Reports
+    # Search type: R
+    # Computer name: SRV-DC01
     # Event IDs: 1074,1076,6005,6006
-    # Data inicial: 2024-11-15
-    # Data final: 2024-11-30
-    # Resultado: Historico remoto de shutdowns e reboots
+    # Start date: 2024-11-15
+    # End date: 2024-11-30
+    # Result: remote shutdown/restart history
 
 .INPUTS
-    String - Tipo de busca (L para Local, R para Remoto)
-    String - Nome do computador remoto (apenas se Remoto)
-    String - Lista de Event IDs separados por virgula (ex: 4624,4625,4648)
-    DateTime - Data inicial da busca no formato AAAA-MM-DD
-    DateTime - Data final da busca no formato AAAA-MM-DD
+    None. The script prompts for:
+    - Search type (L = Local, R = Remote)
+    - Remote computer name (Remote only)
+    - Comma-separated Event IDs (e.g. 4624,4625,4648)
+    - Start and end date (YYYY-MM-DD)
 
 .OUTPUTS
-    - Arquivo Excel (.xlsx) em C:\Temp\EventLog_Exports\
-    - Abas separadas por Event ID para analise organizada
-    - Aba consolidada "Todos os Eventos" com visao geral
-    - Console: Progresso detalhado e estatisticas de coleta
+    - Excel file (.xlsx) in -OutputPath
+    - One worksheet per Event ID, plus an "All Events" worksheet when there are several IDs
+    - Progress and statistics in the console
 
 .NOTES
-    Autor         : Andre Kittler
-    Versao        : 8.0
-    Compatibilidade: PowerShell 5.1+, Windows Server/Client
+    Version       : 8.1
+    Compatibility : PowerShell 5.1+, Windows Server/Client
 
-    Requisitos obrigatorios:
-    - Privilegios de Administrador local (busca local)
-    - Modulo ImportExcel instalado (Install-Module ImportExcel)
-    - Acesso de leitura aos logs de eventos do Windows
-    - Para busca remota: WinRM habilitado no computador de destino
-    - Para busca remota: Credenciais com permissoes no computador remoto
+    Requirements:
+    - Local administrator rights (required to read the Security log locally)
+    - ImportExcel module (Install-Module ImportExcel -Scope CurrentUser)
+    - Read access to the Windows event logs
+    - Remote mode: Get-WinEvent -ComputerName uses the Event Log RPC interface
+      (not WinRM). The target must allow "Remote Event Log Management" inbound
+      (TCP 135 + dynamic RPC ports) and the account needs rights to read the logs
+      (local admin or Event Log Readers).
 
-    Configuracoes tecnicas:
-    - Busca LOCAL: Recursiva em C:\Windows\System32\winevt\Logs\
-    - Busca REMOTA: Consulta logs ativos via Get-WinEvent -ComputerName
-    - Extracao completa de propriedades XML EventData
-    - Skip automatico de arquivos fora do intervalo temporal
+    Technical details:
+    - LOCAL: recursive scan of C:\Windows\System32\winevt\Logs\
+    - REMOTE: active logs only, via Get-WinEvent -ComputerName
+    - All EventData properties are extracted from the event XML
 
-    Logs pesquisados (Local):
-    - Application.evtx (eventos de aplicacoes)
-    - System.evtx (eventos do sistema)  
-    - Security.evtx (eventos de seguranca)
-    - Todos os logs adicionais (.evtx) encontrados
-    - Logs arquivados e rotacionados historicos
-
-    Logs pesquisados (Remoto):
+    Logs searched (Remote):
     - Application, System, Security
     - Microsoft-Windows-PowerShell/Operational
     - Microsoft-Windows-TaskScheduler/Operational
-    - E outros logs ativos configurados
+    - TerminalServices, Windows Defender and WindowsUpdateClient operational logs
+    - Any other log on the target that contains records
 
-    Limitacoes conhecidas:
-    - Busca LOCAL: Requer privilegios administrativos para logs de Security
-    - Busca REMOTA: Nao acessa logs arquivados, apenas logs ativos
-    - Busca REMOTA: Requer WinRM configurado e firewall liberado
-    - Performance varia com quantidade de logs e periodo pesquisado
-
-.LINK
-    https://docs.microsoft.com/en-us/windows/win32/wes/consuming-events
+    Known limitations:
+    - LOCAL: administrator rights required for the Security log
+    - REMOTE: archived logs are not searched, only active logs
+    - REMOTE: requires the Remote Event Log Management firewall rules
+    - Run time grows with the number of logs and the length of the period
 
 .LINK
-    https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.diagnostics/get-winevent
+    https://learn.microsoft.com/windows/win32/wes/consuming-events
+
+.LINK
+    https://learn.microsoft.com/powershell/module/microsoft.powershell.diagnostics/get-winevent
 #>
 
-# --- Verificacao de Privilegios de Administrador ---
+[CmdletBinding()]
+param(
+    [Parameter()]
+    [string]$OutputPath
+)
+
+# --- Output folder ---
+function Resolve-OutputDirectory {
+    param([string]$Path)
+
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($Path)) { $candidates += $Path }
+    elseif ($PSScriptRoot) { $candidates += $PSScriptRoot }
+    else { $candidates += (Get-Location).Path }
+    $candidates += $env:TEMP
+
+    foreach ($candidate in $candidates) {
+        try {
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                New-Item -ItemType Directory -Path $candidate -Force -ErrorAction Stop | Out-Null
+            }
+            $probe = Join-Path -Path $candidate -ChildPath (".write_test_{0}.tmp" -f [guid]::NewGuid())
+            [System.IO.File]::WriteAllText($probe, '')
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+            return $candidate
+        }
+        catch {
+            Write-Warning "Output folder '$candidate' is not writable. Trying the next location."
+        }
+    }
+    throw "No writable output folder found."
+}
+
+# --- Administrator check ---
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Warning "AVISO: Este script nao esta sendo executado com privilegios de Administrador."
-    Write-Warning "Para busca LOCAL de eventos de Security, sao necessarios privilegios administrativos."
-    Write-Warning "Busca REMOTA pode funcionar se voce tiver credenciais apropriadas."
+    Write-Warning "WARNING: This script is not running with administrator privileges."
+    Write-Warning "LOCAL searches of the Security log require administrator privileges."
+    Write-Warning "REMOTE searches may still work if your account has rights on the target."
     Write-Host ""
 }
 
-# --- Inicio da Configuracao e Entrada do Usuario ---
+# --- Configuration and user input ---
 
-# Tenta importar o modulo ImportExcel
+# Import the ImportExcel module
 try {
     Import-Module ImportExcel -ErrorAction Stop
 }
 catch {
-    Write-Error "ERRO: O modulo 'ImportExcel' nao foi encontrado ou nao pode ser carregado."
-    Write-Error "Execute 'Install-Module -Name ImportExcel -Scope CurrentUser' e tente novamente."
+    Write-Error "ERROR: The 'ImportExcel' module was not found or could not be loaded."
+    Write-Error "Run 'Install-Module -Name ImportExcel -Scope CurrentUser' and try again."
     if ($Host.Name -eq "ConsoleHost") {
-        Read-Host "Pressione Enter para sair."
+        Read-Host "Press Enter to exit."
     }
     return
 }
 
-# Define o diretorio para salvar os arquivos exportados
-$exportDirectory = "C:\Temp\EventLog_Exports"
-if (-NOT (Test-Path -Path $exportDirectory)) {
-    New-Item -ItemType Directory -Path $exportDirectory | Out-Null
-    Write-Host "Diretorio de exportacao criado em '$exportDirectory'" -ForegroundColor Cyan
-}
+# Folder for the exported report
+$exportDirectory = Resolve-OutputDirectory -Path $OutputPath
+Write-Host "Output folder: $exportDirectory" -ForegroundColor Cyan
 
-# --- NOVA LOGICA: ESCOLHER LOCAL OU REMOTO ---
+# --- Choose local or remote ---
 $searchType = $null
 $computerName = $null
 $isRemote = $false
 
 while ($null -eq $searchType) {
-    Write-Host "`nEscolha o tipo de busca:" -ForegroundColor Cyan
-    Write-Host "  [L] Local - Busca completa em todos os logs deste computador (incluindo arquivados)"
-    Write-Host "  [R] Remoto - Busca em logs ativos de outro computador via WinRM"
-    $input = Read-Host "Digite L para Local ou R para Remoto"
+    Write-Host "`nChoose the search type:" -ForegroundColor Cyan
+    Write-Host "  [L] Local  - Search all logs on this computer (including archived logs)"
+    Write-Host "  [R] Remote - Search active logs on another computer (Event Log RPC)"
+    $choice = Read-Host "Enter L for Local or R for Remote"
 
-    if ($input -match '^[Ll]$') {
+    if ($choice -match '^[Ll]$') {
         $searchType = "Local"
         $computerName = $env:COMPUTERNAME
-        Write-Host "Modo selecionado: BUSCA LOCAL em '$computerName'" -ForegroundColor Green
+        Write-Host "Selected mode: LOCAL search on '$computerName'" -ForegroundColor Green
     }
-    elseif ($input -match '^[Rr]$') {
-        $searchType = "Remoto"
+    elseif ($choice -match '^[Rr]$') {
+        $searchType = "Remote"
         $isRemote = $true
 
         while ([string]::IsNullOrWhiteSpace($computerName)) {
-            $computerName = Read-Host "Digite o nome ou IP do computador remoto"
+            $computerName = Read-Host "Enter the remote computer name or IP address"
             if ([string]::IsNullOrWhiteSpace($computerName)) {
-                Write-Warning "Nome do computador nao pode ser vazio."
+                Write-Warning "Computer name cannot be empty."
             }
         }
 
-        Write-Host "Modo selecionado: BUSCA REMOTA em '$computerName'" -ForegroundColor Green
-        Write-Host "AVISO: Certifique-se de que WinRM esta habilitado no computador de destino." -ForegroundColor Yellow
-        Write-Host "AVISO: Busca remota acessa apenas logs ativos, nao logs arquivados." -ForegroundColor Yellow
+        Write-Host "Selected mode: REMOTE search on '$computerName'" -ForegroundColor Green
+        Write-Host "NOTE: The target must allow Remote Event Log Management (RPC, TCP 135 + dynamic ports)." -ForegroundColor Yellow
+        Write-Host "NOTE: Remote search covers active logs only, not archived logs." -ForegroundColor Yellow
     }
     else {
-        Write-Warning "Opcao invalida. Digite L ou R."
+        Write-Warning "Invalid option. Enter L or R."
     }
 }
 
-# --- LOGICA PARA MULTIPLOS EVENT IDs ---
+# --- Event ID input ---
 $eventIds = $null
 while ($null -eq $eventIds) {
     try {
-        $input = Read-Host "`nDigite o(s) Event ID(s) que deseja buscar, separados por virgula (ex: 4624,4625,4648)"
+        $idText = Read-Host "`nEnter the Event ID(s) to search for, comma-separated (e.g. 4624,4625,4648)"
 
-        # Remove espacos e divide por virgula
-        $eventIdStrings = $input -replace '\s+', '' -split ','
+        # Remove whitespace and split on commas
+        $eventIdStrings = $idText -replace '\s+', '' -split ','
 
-        # Converte cada string para inteiro e valida
+        # Convert each value to an integer
         $eventIds = @()
         foreach ($idString in $eventIdStrings) {
             if ([string]::IsNullOrWhiteSpace($idString)) {
@@ -187,13 +210,13 @@ while ($null -eq $eventIds) {
         }
 
         if ($eventIds.Count -eq 0) {
-            throw "Nenhum Event ID valido foi fornecido"
+            throw "No valid Event ID was provided"
         }
 
-        Write-Host "Event IDs selecionados: $($eventIds -join ', ')" -ForegroundColor Green
+        Write-Host "Selected Event IDs: $($eventIds -join ', ')" -ForegroundColor Green
 
     } catch { 
-        Write-Warning "Entrada invalida. Por favor, digite apenas numeros separados por virgula para os Event IDs."
+        Write-Warning "Invalid input. Enter numbers separated by commas."
         $eventIds = $null
     }
 }
@@ -202,17 +225,17 @@ $inputStartDate = $null
 $inputEndDate = $null
 while ($null -eq $inputStartDate -or $null -eq $inputEndDate) {
     try {
-        if ($null -eq $inputStartDate) { $input = Read-Host "Digite a DATA INICIAL da busca no formato AAAA-MM-DD"; $inputStartDate = [datetime]$input }
-        if ($null -eq $inputEndDate) { $input = Read-Host "Digite a DATA FINAL da busca no formato AAAA-MM-DD"; $inputEndDate = [datetime]$input }
-        if ($inputEndDate -lt $inputStartDate) { Write-Warning "A data final nao pode ser anterior a data inicial."; $inputStartDate = $null; $inputEndDate = $null }
-    } catch { Write-Warning "Formato de data invalido. Use AAAA-MM-DD."; $inputStartDate = $null; $inputEndDate = $null }
+        if ($null -eq $inputStartDate) { $dateText = Read-Host "Enter the START date (YYYY-MM-DD)"; $inputStartDate = [datetime]$dateText }
+        if ($null -eq $inputEndDate) { $dateText = Read-Host "Enter the END date (YYYY-MM-DD)"; $inputEndDate = [datetime]$dateText }
+        if ($inputEndDate -lt $inputStartDate) { Write-Warning "The end date cannot be earlier than the start date."; $inputStartDate = $null; $inputEndDate = $null }
+    } catch { Write-Warning "Invalid date format. Use YYYY-MM-DD."; $inputStartDate = $null; $inputEndDate = $null }
 }
 
 $startDateFormatted = $inputStartDate.Date.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
 $endDateObject = $inputEndDate.Date.AddDays(1).AddTicks(-1)
 $endDateFormatted = $endDateObject.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.000Z')
 
-# --- XPATH QUERY PARA MULTIPLOS EVENT IDs ---
+# --- XPath query for multiple Event IDs ---
 $eventIdConditions = @()
 foreach ($id in $eventIds) {
     $eventIdConditions += "EventID=$id"
@@ -223,16 +246,16 @@ $xPathQuery = "*[System[$eventIdQuery and TimeCreated[@SystemTime>='$startDateFo
 
 $allFoundEvents = @()
 
-Write-Host "`nIniciando busca pelos Event IDs '$($eventIds -join ', ')' para o periodo de $($inputStartDate.ToString('yyyy-MM-dd')) ate $($inputEndDate.ToString('yyyy-MM-dd'))" -ForegroundColor Green
+Write-Host "`nSearching for Event IDs '$($eventIds -join ', ')' from $($inputStartDate.ToString('yyyy-MM-dd')) to $($inputEndDate.ToString('yyyy-MM-dd'))" -ForegroundColor Green
 
-# --- LOGICA DE BUSCA: LOCAL vs REMOTO ---
+# --- Search: local vs remote ---
 
 if ($isRemote) {
-    # ========== BUSCA REMOTA ==========
-    Write-Host "[MODO REMOTO] Consultando logs ativos em '$computerName'..." -ForegroundColor Cyan
-    Write-Host "NOTA: Apenas logs ativos serao pesquisados (logs arquivados nao sao acessiveis remotamente)." -ForegroundColor Yellow
+    # ========== REMOTE SEARCH ==========
+    Write-Host "[REMOTE] Querying active logs on '$computerName'..." -ForegroundColor Cyan
+    Write-Host "NOTE: Only active logs are searched (archived logs are not available remotely)." -ForegroundColor Yellow
 
-    # Lista de logs comuns para consultar remotamente
+    # Common logs queried first
     $logsToQuery = @(
         'Application',
         'System',
@@ -248,92 +271,92 @@ if ($isRemote) {
     $logCount = 0
     foreach ($logName in $logsToQuery) {
         $logCount++
-        Write-Host "  [$logCount/$($logsToQuery.Count)] Consultando log: $logName" -ForegroundColor Gray
+        Write-Host "  [$logCount/$($logsToQuery.Count)] Querying log: $logName" -ForegroundColor Gray
 
         try {
             $events = Get-WinEvent -ComputerName $computerName -LogName $logName -FilterXPath $xPathQuery -ErrorAction Stop
             if ($null -ne $events) {
                 $allFoundEvents += $events
-                Write-Host "      -> Encontrados $($events.Count) eventos." -ForegroundColor White
+                Write-Host "      -> Found $($events.Count) events." -ForegroundColor White
             }
         }
         catch {
-            # Ignora logs que nao existem ou nao podem ser acessados
+            # Ignore logs that do not exist or cannot be read
             if ($_.Exception.Message -notmatch "No events were found") {
-                Write-Host "      -> Log inacessivel ou inexistente." -ForegroundColor DarkGray
+                Write-Host "      -> Log not accessible or does not exist." -ForegroundColor DarkGray
             }
         }
     }
 
-    # Tenta obter lista de todos os logs disponiveis e consultar os demais
-    Write-Host "`n  [Extra] Verificando logs adicionais no sistema remoto..." -ForegroundColor Gray
+    # List all remaining logs on the target and query them too
+    Write-Host "`n  [Extra] Checking additional logs on the remote computer..." -ForegroundColor Gray
     try {
         $allRemoteLogs = Get-WinEvent -ComputerName $computerName -ListLog * -ErrorAction Stop | Where-Object { $_.RecordCount -gt 0 -and $_.LogName -notin $logsToQuery }
 
         foreach ($log in $allRemoteLogs) {
-            Write-Host "      Consultando: $($log.LogName)" -ForegroundColor DarkGray
+            Write-Host "      Querying: $($log.LogName)" -ForegroundColor DarkGray
             try {
                 $events = Get-WinEvent -ComputerName $computerName -LogName $log.LogName -FilterXPath $xPathQuery -ErrorAction Stop
                 if ($null -ne $events) {
                     $allFoundEvents += $events
-                    Write-Host "      -> Encontrados $($events.Count) eventos." -ForegroundColor White
+                    Write-Host "      -> Found $($events.Count) events." -ForegroundColor White
                 }
             }
             catch {
-                # Silenciosamente ignora logs que nao podem ser consultados
+                # Silently skip logs that cannot be queried
             }
         }
     }
     catch {
-        Write-Host "      -> Nao foi possivel listar logs adicionais." -ForegroundColor DarkGray
+        Write-Host "      -> Could not list additional logs." -ForegroundColor DarkGray
     }
 }
 else {
-    # ========== BUSCA LOCAL ==========
-    Write-Host "[MODO LOCAL] Buscando em todos os arquivos de log (.evtx) em '$env:COMPUTERNAME'..." -ForegroundColor Cyan
+    # ========== LOCAL SEARCH ==========
+    Write-Host "[LOCAL] Searching all log files (.evtx) on '$env:COMPUTERNAME'..." -ForegroundColor Cyan
 
     $logsPath = "C:\Windows\System32\winevt\Logs"
-    Write-Warning "AVISO: A busca sera realizada em TODOS os arquivos de log em '$logsPath'. Este processo pode ser demorado."
+    Write-Warning "ALL log files in '$logsPath' will be searched. This can take a while."
 
-    Write-Host "[1/2] Procurando em todos os arquivos de log (.evtx)..." -ForegroundColor Cyan
+    Write-Host "[1/2] Searching all log files (.evtx)..." -ForegroundColor Cyan
     $allLogFiles = Get-ChildItem -Path $logsPath -Filter "*.evtx" -File -Recurse -ErrorAction SilentlyContinue
 
     if ($null -ne $allLogFiles) {
-        Write-Host "    -> Encontrados $($allLogFiles.Count) arquivos de log (.evtx) para verificar."
+        Write-Host "    -> Found $($allLogFiles.Count) log files (.evtx) to check."
 
         $fileCount = 0
         foreach ($file in $allLogFiles) {
             $fileCount++
 
-            # Performance: Pula arquivos que estao completamente fora do intervalo de datas
+            # Performance: skip files last written before the start date
             if ($file.LastWriteTime -lt $inputStartDate.Date) {
                 continue
             }
 
-            Write-Host "    [$fileCount/$($allLogFiles.Count)] Verificando: $($file.Name)" -ForegroundColor Gray
+            Write-Host "    [$fileCount/$($allLogFiles.Count)] Checking: $($file.Name)" -ForegroundColor Gray
             try {
                 $archivedEvents = Get-WinEvent -Path $file.FullName -FilterXPath $xPathQuery -ErrorAction Stop
                 if ($null -ne $archivedEvents) {
                     $allFoundEvents += $archivedEvents
-                    Write-Host "        -> Encontrados $($archivedEvents.Count) eventos." -ForegroundColor White
+                    Write-Host "        -> Found $($archivedEvents.Count) events." -ForegroundColor White
                 }
             }
             catch {
-                # Ignora arquivos que nao podem ser processados (em uso, corrompidos, etc)
+                # Skip files that cannot be read (locked, corrupted, etc.)
             }
         }
     }
     else {
-        Write-Host "    -> Nenhum arquivo de log (.evtx) encontrado no diretorio especificado." -ForegroundColor Gray
+        Write-Host "    -> No log files (.evtx) found in the log folder." -ForegroundColor Gray
     }
 }
 
-# --- Processamento e Exportacao dos Resultados ---
+# --- Processing and export ---
 
-Write-Host "`n[2/2] Processando e exportando resultados..." -ForegroundColor Cyan
+Write-Host "`n[2/2] Processing and exporting results..." -ForegroundColor Cyan
 
 if ($allFoundEvents.Count -gt 0) {
-    Write-Host "Total de $($allFoundEvents.Count) eventos brutos encontrados. Extraindo detalhes..." -ForegroundColor Green
+    Write-Host "$($allFoundEvents.Count) raw events found. Extracting details..." -ForegroundColor Green
 
     $detailedResults = @()
 
@@ -356,47 +379,47 @@ if ($allFoundEvents.Count -gt 0) {
         $detailedResults += New-Object -TypeName PSObject -Property $properties
     }
 
-    # --- NOME DE ARQUIVO PARA MULTIPLOS EVENT IDs ---
+    # --- Output file name ---
     $eventIdsList = $eventIds -join '-'
     $computerNameSafe = $computerName -replace '[^a-zA-Z0-9]', '_'
-    $fileName = "EventLog_$($searchType)_$($computerNameSafe)_IDs-$($eventIdsList)_$($inputStartDate.ToString('yyyyMMdd'))-a-$($inputEndDate.ToString('yyyyMMdd')).xlsx"
+    $fileName = "EventLog_$($searchType)_$($computerNameSafe)_IDs-$($eventIdsList)_$($inputStartDate.ToString('yyyyMMdd'))-to-$($inputEndDate.ToString('yyyyMMdd')).xlsx"
     $outputPath = Join-Path -Path $exportDirectory -ChildPath $fileName
 
-    Write-Host "Exportando $($detailedResults.Count) eventos detalhados para '$outputPath'..." -ForegroundColor Cyan
+    Write-Host "Exporting $($detailedResults.Count) events to '$outputPath'..." -ForegroundColor Cyan
 
-    # Agrupa os resultados por Event ID para criar abas separadas
+    # Group results by Event ID (one worksheet each)
     $groupedResults = $detailedResults | Group-Object -Property EventID
 
-    # Se houver multiplos Event IDs, cria uma aba para cada um
+    # Several Event IDs: one worksheet per ID
     if ($groupedResults.Count -gt 1) {
         foreach ($group in $groupedResults) {
             $worksheetName = "Event ID $($group.Name)"
             $group.Group | Export-Excel -Path $outputPath -AutoSize -TableName "EventData_$($group.Name)" -TableStyle Medium9 -WorksheetName $worksheetName
         }
 
-        # Cria tambem uma aba com todos os resultados consolidados
-        $detailedResults | Export-Excel -Path $outputPath -AutoSize -TableName "AllEvents" -TableStyle Medium9 -WorksheetName "Todos os Eventos"
+        # Plus a consolidated worksheet
+        $detailedResults | Export-Excel -Path $outputPath -AutoSize -TableName "AllEvents" -TableStyle Medium9 -WorksheetName "All Events"
     }
     else {
-        # Se houver apenas um Event ID, usa o formato original
+        # Single Event ID: one worksheet
         $detailedResults | Export-Excel -Path $outputPath -AutoSize -TableName "EventData" -TableStyle Medium9 -WorksheetName "Event ID $($eventIds[0])" -ClearSheet
     }
 
-    Write-Host "`nExportacao concluida com sucesso!" -ForegroundColor Green
-    Write-Host "Arquivo salvo em: $outputPath"
+    Write-Host "`nExport completed successfully." -ForegroundColor Green
+    Write-Host "File saved to: $outputPath"
 
-    # Exibe resumo por Event ID
-    Write-Host "`nResumo dos eventos encontrados:" -ForegroundColor Cyan
-    Write-Host "  Computador: $computerName ($searchType)" -ForegroundColor White
+    # Summary per Event ID
+    Write-Host "`nEvents found:" -ForegroundColor Cyan
+    Write-Host "  Computer: $computerName ($searchType)" -ForegroundColor White
     foreach ($group in $groupedResults) {
-        Write-Host "  Event ID $($group.Name): $($group.Count) eventos" -ForegroundColor White
+        Write-Host "  Event ID $($group.Name): $($group.Count) events" -ForegroundColor White
     }
 }
 else {
-    Write-Host "`nBusca finalizada. Nenhum evento com os IDs '$($eventIds -join ', ')' foi encontrado no periodo especificado." -ForegroundColor Yellow
+    Write-Host "`nSearch finished. No events with IDs '$($eventIds -join ', ')' were found in the selected period." -ForegroundColor Yellow
     if ($isRemote) {
-        Write-Host "DICA: Verifique se WinRM esta habilitado e se voce tem permissoes no computador remoto." -ForegroundColor Yellow
+        Write-Host "HINT: Check that Remote Event Log Management is allowed through the firewall and that you have rights on the remote computer." -ForegroundColor Yellow
     }
 }
 
-Write-Host "`nScript finalizado." -ForegroundColor Cyan
+Write-Host "`nScript finished." -ForegroundColor Cyan

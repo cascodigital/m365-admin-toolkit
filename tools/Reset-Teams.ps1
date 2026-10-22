@@ -1,72 +1,81 @@
 <#
 .SYNOPSIS
-    Remove o Microsoft Teams (novo + classico) por completo e reinstala o Teams novo.
+    Fully removes Microsoft Teams (new + classic) and reinstalls the new Teams.
 .DESCRIPTION
-    Para quando o Teams nao abre, trava no login ou fica preso em cache corrompido.
-    Remove o pacote MSTeams (todos os usuarios, se admin), o pacote provisionado, o
-    Teams classico, o Machine-Wide Installer, o add-in de reuniao do Outlook e os
-    caches do perfil alvo. Opcionalmente limpa caches de token do Office (WAM/OneAuth),
-    o que forca relogin. Reinstala via winget, com fallback para o teamsbootstrapper.
+    For when Teams will not open, hangs at sign-in or is stuck on a corrupted cache.
+    Removes the MSTeams package (all users, if admin), the provisioned package, classic
+    Teams, the Machine-Wide Installer, the Outlook meeting add-in and the target profile's
+    caches. Optionally clears the Office token caches (WAM/OneAuth), which forces a new
+    sign-in. Reinstalls via winget, with the teamsbootstrapper as fallback.
 
-    SIMULA POR PADRAO. A primeira rodada so lista o que seria removido e grava o
-    plano em plano-teams.json. A segunda, com a chave EXECUTAR, aplica esse plano.
-    Fundos de video personalizados sao copiados para a pasta de saida antes de apagar.
+    SIMULATES BY DEFAULT. The first run only lists what would be removed and saves the
+    plan to plan-teams.json. The second run, with the APPLY key, applies that plan.
+    Custom video backgrounds are copied to the output folder before deletion.
 
-    Opcoes (usuario alvo, limpar tokens, reinstalar) ficam no bloco ESCOPO do script.
+    Options (target user, clear tokens, reinstall) live in the SCOPE block of the script.
 .EXAMPLE
     .\Reset-Teams.ps1
-    Simula e grava o plano.
+    Simulates and saves the plan.
 .EXAMPLE
-    $global:EXECUTAR = $true; .\Reset-Teams.ps1
-    Aplica o plano gerado na simulacao (valido por 60 minutos).
+    $global:APPLY = $true; .\Reset-Teams.ps1
+    Applies the plan produced by the simulation (valid for 60 minutes).
 .NOTES
-    Rodar como administrador para remover o pacote de todos os usuarios.
-    Autor: Andre Kittler da Costa
+    Run as administrator to remove the package for all users.
+    The legacy key $global:EXECUTAR is still accepted as an alias of $global:APPLY.
+    Logs/verification CSVs go to the 'csv' subfolder next to the script ($env:TEMP if not writable).
 #>
 # =====================================================================
-# Reset-Teams.ps1  -- remocao total do Microsoft Teams (novo + classico)
-#                         e reinstalacao do Teams novo
+# Reset-Teams.ps1  -- full removal of Microsoft Teams (new + classic)
+#                         and reinstall of the new Teams
 #
-# IMPACTO: fecha o Teams; remove o pacote MSTeams (todos os usuarios, se admin),
-#          o pacote provisionado, o Teams classico, o Machine-Wide Installer, o
-#          add-in de reuniao do Outlook, caches e temporarios do perfil alvo e,
-#          se ligado, os caches de token do Office (forca relogin no Office).
-#          Reinstala o Teams novo no fim (winget; fallback teamsbootstrapper).
-# ALVO:    perfil do usuario logado na maquina (ou $UsuarioAlvo). Lista literal
-#          impressa como "ALVOS: n" e gravada em plano-teams.json na simulacao.
-# ROLLBACK: a reinstalacao do proprio script + relogar. Chats e arquivos vem do
-#           servidor. IRREVERSIVEL: fundos de video personalizados -- o script
-#           copia eles para a pasta de saida antes de apagar.
+# IMPACT: closes Teams; removes the MSTeams package (all users, if admin),
+#          the provisioned package, classic Teams, the Machine-Wide Installer, the
+#          Outlook meeting add-in, caches and temp files of the target profile and,
+#          if enabled, the Office token caches (forces re-login in Office).
+#          Reinstalls the new Teams at the end (winget; fallback teamsbootstrapper).
+# TARGET:  profile of the user logged on to the machine (or $TargetUser). Literal list
+#          printed as "TARGETS: n" and saved to plan-teams.json during simulation.
+# ROLLBACK: the script's own reinstall + signing in again. Chats and files come from the
+#           server. IRREVERSIBLE: custom video backgrounds -- the script
+#           copies them to the output folder before deleting.
 #
-# USO (2 rodadas, como sempre):
-#     .\Reset-Teams.ps1                                 # 1) simula e grava o plano
-#     $global:EXECUTAR = $true; .\Reset-Teams.ps1       # 2) aplica o plano
+# USAGE (2 runs):
+#     .\Reset-Teams.ps1                                 # 1) simulates and saves the plan
+#     $global:APPLY = $true; .\Reset-Teams.ps1       # 2) applies the plan
 # =====================================================================
 
-# ---------- PREAMBULO DE SEGURANCA ----------
-# Este script SIMULA por padrao. Para APLICAR, rode tudo num comando so:
-#     $global:EXECUTAR = $true; .\Reset-Teams.ps1
-$Execute = $false                 # <<< FALHA FECHADA: NUNCA remover esta linha
-$__k = Get-Variable EXECUTAR -Scope Global -ValueOnly -ErrorAction SilentlyContinue
-$Execute = ($__k -is [bool] -and $__k)
-$global:EXECUTAR = $false         # consome a chave
+# ---------- SAFETY PREAMBLE ----------
+# This script SIMULATES by default. To APPLY, run everything in a single command:
+#     $global:APPLY = $true; .\Reset-Teams.ps1
+$Execute = $false                 # <<< FAIL CLOSED: NEVER remove this line
+$__k  = Get-Variable APPLY    -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+$__k2 = Get-Variable EXECUTAR -Scope Global -ValueOnly -ErrorAction SilentlyContinue   # legacy key name
+$Execute = (($__k -is [bool] -and $__k) -or ($__k2 -is [bool] -and $__k2))
+$global:APPLY = $false         # consumes the key
+$global:EXECUTAR = $false
 
-$saida = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
-try { $__p = Join-Path $saida "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
-catch { $saida = $env:TEMP; Write-Host "AVISO: saida redirecionada para $saida" -Foreground Yellow }
+$outDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+try { $__p = Join-Path $outDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $outDir = $env:TEMP; Write-Host "WARNING: output redirected to $outDir" -Foreground Yellow }
+$__root = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.ProviderPath }
+$csvDir = Join-Path $__root 'csv'   # CSV always in the csv subfolder next to the script, even if the script is moved
+if ((-not (Test-Path $csvDir)) -and (Test-Path (Join-Path (Split-Path $__root) 'csv'))) { $csvDir = Join-Path (Split-Path $__root) 'csv' }   # script in a subfolder: use the csv folder of the parent
+try { if (-not (Test-Path $csvDir)) { $null = New-Item -ItemType Directory -Path $csvDir -ErrorAction Stop } } catch {}
+try { $__p = Join-Path $csvDir "w$PID.tmp"; [IO.File]::WriteAllText($__p,'x'); [IO.File]::Delete($__p) }
+catch { $csvDir = $env:TEMP; Write-Host "WARNING: CSV output redirected to $csvDir" -Foreground Yellow }
 
-# ---------- ESCOPO (edite aqui, sao as unicas chaves) ----------
-$UsuarioAlvo       = ''       # vazio = usuario logado na maquina. Ou o nome da pasta em C:\Users
-$LimparTokens      = $true    # caches WAM/OneAuth/IdentityCache -> relogin em Teams E Office
-$LimparCredenciais = $true    # Gerenciador de Credenciais (so funciona rodando NA conta do usuario)
-$Reinstalar        = $true    # reinstala o Teams novo no fim
-$ValidadePlanoMin  = 60       # plano mais velho que isso e recusado
+# ---------- SCOPE (edit here, these are the only switches) ----------
+$TargetUser       = ''       # empty = user logged on to the machine. Or the folder name under C:\Users
+$ClearTokens      = $true    # WAM/OneAuth/IdentityCache caches -> re-login in Teams AND Office
+$ClearCredentials = $true    # Credential Manager (only works when running AS the user's account)
+$Reinstall        = $true    # reinstalls the new Teams at the end
+$PlanValidityMin  = 60       # a plan older than this is rejected
 
-$PkgNames  = @('MSTeams','MicrosoftTeams')   # Teams novo (trabalho) e o Teams "chat" do Win11
+$PkgNames  = @('MSTeams','MicrosoftTeams')   # new Teams (work) and the Win11 "chat" Teams
 $WingetId  = 'Microsoft.Teams'
 $BootUrl   = 'https://go.microsoft.com/fwlink/?linkid=2243204&clcid=0x409'
 $ts        = Get-Date -f yyyyMMdd-HHmmss
-$plano     = Join-Path $saida 'plano-teams.json'
+$planFile     = Join-Path $outDir 'plan-teams.json'
 
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     Import-Module Appx -UseWindowsPowerShell -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null
@@ -76,50 +85,50 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$meuSid  = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$mySid  = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
-# ================= QUEM E O USUARIO ALVO =================
-# Rodando elevado com a conta _a, $env:LOCALAPPDATA e HKCU sao do ADMIN, nao do
-# usuario. Por isso o perfil alvo e resolvido pelo SID, nunca por variavel de ambiente.
+# ================= WHO IS THE TARGET USER =================
+# When running elevated with a separate admin account, $env:LOCALAPPDATA and HKCU belong to the ADMIN, not to the
+# user. That is why the target profile is resolved by SID, never by environment variable.
 $plKey  = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
-$alvoSid = $null
+$targetSid = $null
 if (-not $isAdmin) {
-    $alvoSid = $meuSid
-} elseif ($UsuarioAlvo) {
+    $targetSid = $mySid
+} elseif ($TargetUser) {
     $hit = @(Get-ChildItem $plKey -ErrorAction SilentlyContinue | Where-Object {
-        (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath -like "*\$UsuarioAlvo" })
-    if ($hit.Count -eq 1) { $alvoSid = $hit[0].PSChildName }
+        (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath -like "*\$TargetUser" })
+    if ($hit.Count -eq 1) { $targetSid = $hit[0].PSChildName }
 } else {
-    $donos = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+    $owners = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
         $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
         if ($o -and $o.Sid) { $o.Sid } } | Sort-Object -Unique)
-    if ($donos.Count -eq 1) { $alvoSid = $donos[0] }
-    elseif ($donos.Count -gt 1) {
-        Write-Host "PARE: $($donos.Count) usuarios logados. Preencha `$UsuarioAlvo no topo do script." -Foreground Red
+    if ($owners.Count -eq 1) { $targetSid = $owners[0] }
+    elseif ($owners.Count -gt 1) {
+        Write-Host "STOP: $($owners.Count) users logged on. Set `$TargetUser at the top of the script." -Foreground Red
         return
     }
 }
 $prof = $null
-if ($alvoSid) { $prof = (Get-ItemProperty "$plKey\$alvoSid" -ErrorAction SilentlyContinue).ProfileImagePath }
+if ($targetSid) { $prof = (Get-ItemProperty "$plKey\$targetSid" -ErrorAction SilentlyContinue).ProfileImagePath }
 if (-not $prof -or -not (Test-Path -LiteralPath $prof)) {
-    Write-Host "PARE: nao achei o perfil do usuario alvo. Preencha `$UsuarioAlvo (nome da pasta em C:\Users)." -Foreground Red
+    Write-Host "STOP: could not find the target user's profile. Set `$TargetUser (folder name under C:\Users)." -Foreground Red
     return
 }
-$alvoNome     = Split-Path $prof -Leaf
-$mesmoUsuario = ($alvoSid -eq $meuSid)
+$targetName     = Split-Path $prof -Leaf
+$sameUser = ($targetSid -eq $mySid)
 $L   = Join-Path $prof 'AppData\Local'
 $R   = Join-Path $prof 'AppData\Roaming'
-$HKU = "Registry::HKEY_USERS\$alvoSid"
+$HKU = "Registry::HKEY_USERS\$targetSid"
 
 Write-Host ""
-Write-Host "USUARIO ALVO: $alvoNome  ($alvoSid)" -Foreground Cyan
-Write-Host "ADMIN: $isAdmin   RODANDO COMO O PROPRIO USUARIO: $mesmoUsuario" -Foreground Cyan
+Write-Host "TARGET USER: $targetName  ($targetSid)" -Foreground Cyan
+Write-Host "ADMIN: $isAdmin   RUNNING AS THE USER THEMSELVES: $sameUser" -Foreground Cyan
 
-# ================= FUNCOES DE LEITURA =================
+# ================= READ-ONLY FUNCTIONS =================
 function Get-TeamsMsi {
     $keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
               'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
-    if ($mesmoUsuario) { $keys += "$HKU\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" }
+    if ($sameUser) { $keys += "$HKU\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" }
     Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object {
         $_.PSChildName -match '^\{[0-9A-Fa-f\-]{36}\}$' -and
         $_.DisplayName -match '^(Teams Machine-Wide Installer|Microsoft Teams Meeting Add-in|Microsoft Teams classic|Microsoft Teams)' }
@@ -131,16 +140,16 @@ function Get-TeamsAppx {
 function Get-TeamsProv {
     if ($isAdmin) { Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object { $PkgNames -contains $_.DisplayName } }
 }
-function Get-Estado {
-    # -User nao aceita SID de conta Entra (S-1-12-1-...): filtra o -AllUsers pelo SID
-    if ($isAdmin) { $doUser = @(Get-AppxPackage -AllUsers -Name MSTeams -ErrorAction SilentlyContinue | Where-Object {
-                        @($_.PackageUserInformation | Where-Object { $_.UserSecurityId.Sid -eq $alvoSid -and "$($_.InstallState)" -eq 'Installed' }).Count }) }
-    else          { $doUser = Get-AppxPackage -Name MSTeams -ErrorAction SilentlyContinue }
+function Get-State {
+    # -User does not accept an Entra account SID (S-1-12-1-...): filter -AllUsers by SID instead
+    if ($isAdmin) { $forUser = @(Get-AppxPackage -AllUsers -Name MSTeams -ErrorAction SilentlyContinue | Where-Object {
+                        @($_.PackageUserInformation | Where-Object { $_.UserSecurityId.Sid -eq $targetSid -and "$($_.InstallState)" -eq 'Installed' }).Count }) }
+    else          { $forUser = Get-AppxPackage -Name MSTeams -ErrorAction SilentlyContinue }
     [pscustomobject]@{
-        TeamsNoUsuario = [bool]$doUser
-        Provisionado   = if ($isAdmin) { [bool](@(Get-TeamsProv) | Where-Object { $_.DisplayName -eq 'MSTeams' }) } else { 'n/a' }
-        PastaPacote    = Test-Path -LiteralPath "$L\Packages\MSTeams_8wekyb3d8bbwe"
-        PastaClassico  = (Test-Path -LiteralPath "$L\Microsoft\Teams") -or (Test-Path -LiteralPath "$R\Microsoft\Teams")
+        TeamsForUser = [bool]$forUser
+        Provisioned   = if ($isAdmin) { [bool](@(Get-TeamsProv) | Where-Object { $_.DisplayName -eq 'MSTeams' }) } else { 'n/a' }
+        PackageFolder    = Test-Path -LiteralPath "$L\Packages\MSTeams_8wekyb3d8bbwe"
+        ClassicFolder  = (Test-Path -LiteralPath "$L\Microsoft\Teams") -or (Test-Path -LiteralPath "$R\Microsoft\Teams")
         MsiTeams       = @(Get-TeamsMsi).Count
     }
 }
@@ -149,40 +158,40 @@ function Get-WingetExe {
     if ($c) { return $c.Source }
     $p = @(Resolve-Path "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue)
     foreach ($x in ($p | Sort-Object Path -Descending)) {
-        # o exe do WindowsApps pode existir e dar 'Access denied' na conta admin: so vale se RODAR
+        # the WindowsApps exe may exist and return 'Access denied' on the admin account: it only counts if it RUNS
         try { $null = & $x.Path --version 2>&1; if ($LASTEXITCODE -eq 0) { return $x.Path } } catch {}
     }
     return $null
 }
 
-# ================= LEVANTAMENTO DE ALVOS (so leitura) =================
-$alvos = New-Object System.Collections.Generic.List[object]
-function Add-Alvo($ordem,$tipo,$acao,$alvo,$det) {
-    $alvos.Add([pscustomobject]@{ Ordem=$ordem; Tipo=$tipo; Acao=$acao; Alvo=$alvo; Detalhe=$det })
+# ================= TARGET DISCOVERY (read-only) =================
+$targets = New-Object System.Collections.Generic.List[object]
+function Add-Target($order,$kind,$action,$target,$det) {
+    $targets.Add([pscustomobject]@{ Order=$order; Kind=$kind; Action=$action; Target=$target; Detail=$det })
 }
 
-# 1) processos
+# 1) processes
 foreach ($p in @('ms-teams','Teams','msteamsupdate','ms-teamsupdate')) {
     $procs = @(Get-Process -Name $p -ErrorAction SilentlyContinue)
-    if ($procs.Count) { Add-Alvo 1 'Processo' 'Stop-Process -Force' $p "$($procs.Count) instancia(s)" }
+    if ($procs.Count) { Add-Target 1 'Process' 'Stop-Process -Force' $p "$($procs.Count) instance(s)" }
 }
 
-# 2) MSIs: Machine-Wide Installer, add-in de reuniao, classico
+# 2) MSIs: Machine-Wide Installer, meeting add-in, classic
 if ($isAdmin) {
-    foreach ($m in @(Get-TeamsMsi)) { Add-Alvo 2 'MSI' 'msiexec /x /qn' $m.PSChildName $m.DisplayName }
+    foreach ($m in @(Get-TeamsMsi)) { Add-Target 2 'MSI' 'msiexec /x /qn' $m.PSChildName $m.DisplayName }
 }
 
-# 3) pacote Appx
+# 3) Appx package
 foreach ($a in @(Get-TeamsAppx)) {
-    $acao = if ($isAdmin) { 'Remove-AppxPackage -AllUsers' } else { 'Remove-AppxPackage' }
-    Add-Alvo 3 'Appx' $acao $a.PackageFullName "versao $($a.Version)"
+    $action = if ($isAdmin) { 'Remove-AppxPackage -AllUsers' } else { 'Remove-AppxPackage' }
+    Add-Target 3 'Appx' $action $a.PackageFullName "version $($a.Version)"
 }
 
-# 4) pacote provisionado (senao volta em perfil novo)
-foreach ($pp in @(Get-TeamsProv)) { Add-Alvo 4 'AppxProv' 'Remove-AppxProvisionedPackage' $pp.PackageName 'provisionado na imagem' }
+# 4) provisioned package (otherwise it comes back on a new profile)
+foreach ($pp in @(Get-TeamsProv)) { Add-Target 4 'AppxProv' 'Remove-AppxProvisionedPackage' $pp.PackageName 'provisioned in the image' }
 
-# 5) pastas de dados, cache e temporarios
-$pastas = @(
+# 5) data, cache and temp folders
+$folders = @(
     "$L\Packages\MSTeams_8wekyb3d8bbwe"
     "$L\Packages\MicrosoftTeams_8wekyb3d8bbwe"
     "$L\Microsoft\Teams"
@@ -191,153 +200,154 @@ $pastas = @(
     "$L\Microsoft\TeamsPresenceAddin"
     "$L\SquirrelTemp"
     "$R\Microsoft\Teams"
-    "$env:ProgramData\$alvoNome\Microsoft\Teams"
+    "$env:ProgramData\$targetName\Microsoft\Teams"
 )
-if ($isAdmin) { $pastas += "${env:ProgramFiles(x86)}\Teams Installer" }
-if ($LimparTokens) {
-    $pastas += @(
+if ($isAdmin) { $folders += "${env:ProgramFiles(x86)}\Teams Installer" }
+if ($ClearTokens) {
+    $folders += @(
         "$L\Microsoft\OneAuth"
         "$L\Microsoft\IdentityCache"
         "$L\Microsoft\TokenBroker\Cache"
-        "$L\Packages\Microsoft.AAD.BrokerPlugin_cne1h2txyewy\AC\TokenBroker"
+        "$L\Packages\Microsoft.AAD.BrokerPlugin_cw5n1h2txyewy\AC\TokenBroker"
     )
 }
-$pastas += @(Get-ChildItem -LiteralPath "$L\Temp" -Force -ErrorAction SilentlyContinue |
+$folders += @(Get-ChildItem -LiteralPath "$L\Temp" -Force -ErrorAction SilentlyContinue |
              Where-Object { $_.Name -match 'teams' } | ForEach-Object { $_.FullName })
-foreach ($f in $pastas) {
+foreach ($f in $folders) {
     if (Test-Path -LiteralPath $f) {
         $sz = 0
         try { $sz = [math]::Round((Get-ChildItem -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue |
                    Measure-Object Length -Sum).Sum / 1MB, 1) } catch {}
-        Add-Alvo 5 'Pasta' 'Remove-Item -Recurse -Force' $f "$sz MB"
+        Add-Target 5 'Folder' 'Remove-Item -Recurse -Force' $f "$sz MB"
     }
 }
 
-# 6) registro do usuario alvo (so se a hive estiver carregada = usuario logado)
+# 6) target user's registry (only if the hive is loaded = user logged on)
 if (Test-Path -LiteralPath "$HKU\Software\Microsoft\Office\Teams") {
-    Add-Alvo 6 'RegChave' 'Remove-Item (chave)' "$HKU\Software\Microsoft\Office\Teams" 'config do Teams classico'
+    Add-Target 6 'RegKey' 'Remove-Item (key)' "$HKU\Software\Microsoft\Office\Teams" 'classic Teams config'
 }
 $runKey = "$HKU\Software\Microsoft\Windows\CurrentVersion\Run"
 foreach ($v in @('com.squirrel.Teams.Teams','Teams')) {
-    $existe = $false
-    try { $existe = $null -ne (Get-ItemProperty -LiteralPath $runKey -Name $v -ErrorAction Stop) } catch {}
-    if ($existe) { Add-Alvo 6 'RegValor' 'Remove-ItemProperty' "$runKey|$v" 'autostart do classico' }
+    $exists = $false
+    try { $exists = $null -ne (Get-ItemProperty -LiteralPath $runKey -Name $v -ErrorAction Stop) } catch {}
+    if ($exists) { Add-Target 6 'RegValue' 'Remove-ItemProperty' "$runKey|$v" 'classic autostart' }
 }
 
-# 7) credenciais (o cofre e por conta: so da pra limpar rodando como o proprio usuario)
-if ($LimparCredenciais -and $mesmoUsuario) {
+# 7) credentials (the vault is per account: can only be cleared when running as the user themselves)
+if ($ClearCredentials -and $sameUser) {
+    # 'Destino:' = Portuguese-localized cmdkey output, 'Target:' = English
     $creds = @(cmdkey /list 2>$null | Select-String 'Destino:|Target:' |
         ForEach-Object { ($_ -split ':',2)[1].Trim() } |
         Where-Object { $_ -match 'msteams|teams|MicrosoftOffice|OneAuthAccount' })
-    foreach ($c in ($creds | Sort-Object -Unique)) { Add-Alvo 7 'Credencial' 'cmdkey /delete' $c 'credencial salva' }
+    foreach ($c in ($creds | Sort-Object -Unique)) { Add-Target 7 'Credential' 'cmdkey /delete' $c 'saved credential' }
 }
 
-# ================= CONTAGEM =================
+# ================= COUNT =================
 Write-Host ""
-Write-Host "ALVOS: $($alvos.Count)" -Foreground Cyan
+Write-Host "TARGETS: $($targets.Count)" -Foreground Cyan
 if (-not $isAdmin) {
-    Write-Host "AVISO: SEM admin - Machine-Wide Installer, add-in e pacote provisionado ficam (Teams volta sozinho)." -Foreground Yellow
+    Write-Host "WARNING: NO admin - Machine-Wide Installer, add-in and provisioned package stay (Teams comes back on its own)." -Foreground Yellow
 }
-if ($LimparCredenciais -and -not $mesmoUsuario) {
-    Write-Host "INFO: credenciais do cofre puladas (cofre e da conta do usuario, nao da conta admin)." -Foreground Yellow
+if ($ClearCredentials -and -not $sameUser) {
+    Write-Host "INFO: vault credentials skipped (the vault belongs to the user's account, not the admin account)." -Foreground Yellow
 }
-$alvos | Sort-Object Ordem | Format-Table Tipo,Alvo,Detalhe -AutoSize | Out-Host
+$targets | Sort-Object Order | Format-Table Kind,Target,Detail -AutoSize | Out-Host
 
-$antes = Get-Estado
+$before = Get-State
 
-# ================= ACAO =================
-$falhas   = 0
-$aplicar  = @()
-$log      = Join-Path $saida "nuke-teams-$ts.csv"
-$fundosEm = $null
+# ================= ACTION =================
+$failures   = 0
+$toApply  = @()
+$log      = Join-Path $csvDir "nuke-teams-$ts.csv"
+$backgroundsDir = $null
 
 if (-not $Execute) {
-    foreach ($a in ($alvos | Sort-Object Ordem)) { Write-Host "SIMULACAO: $($a.Acao) '$($a.Alvo)'" }
-    # .ToArray(): @(List[object]) dentro de hashtable quebra no PS 5.1 ("Argument types do not match")
-    [pscustomobject]@{ Criado = (Get-Date).ToString('o'); Sid = $alvoSid; Alvos = $alvos.ToArray() } |
-        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $plano -Encoding UTF8
+    foreach ($a in ($targets | Sort-Object Order)) { Write-Host "SIMULATION: $($a.Action) '$($a.Target)'" }
+    # .ToArray(): @(List[object]) inside a hashtable breaks on PS 5.1 ("Argument types do not match")
+    [pscustomobject]@{ Created = (Get-Date).ToString('o'); Sid = $targetSid; Targets = $targets.ToArray() } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $planFile -Encoding UTF8
 } else {
-    # --- gate do plano (R11): so aplica o que foi mostrado na simulacao ---
-    if (-not (Test-Path -LiteralPath $plano)) {
-        Write-Host "PARE: nao existe plano. Rode primeiro SEM a chave:  .\Reset-Teams.ps1" -Foreground Red
+    # --- plan gate: only apply what was shown in the simulation ---
+    if (-not (Test-Path -LiteralPath $planFile)) {
+        Write-Host "STOP: no plan exists. First run WITHOUT the key:  .\Reset-Teams.ps1" -Foreground Red
         return
     }
-    $pj    = Get-Content -LiteralPath $plano -Raw | ConvertFrom-Json
-    $idade = ((Get-Date) - [datetime]$pj.Criado).TotalMinutes
-    if ($idade -gt $ValidadePlanoMin) {
-        Write-Host "PARE: plano com $([math]::Round($idade)) min (limite $ValidadePlanoMin). Simule de novo." -Foreground Red
+    $pj    = Get-Content -LiteralPath $planFile -Raw | ConvertFrom-Json
+    $ageMin = ((Get-Date) - [datetime]$pj.Created).TotalMinutes
+    if ($ageMin -gt $PlanValidityMin) {
+        Write-Host "STOP: plan is $([math]::Round($ageMin)) min old (limit $PlanValidityMin). Simulate again." -Foreground Red
         return
     }
-    if ($pj.Sid -ne $alvoSid) {
-        Write-Host "PARE: o plano e de outro usuario ($($pj.Sid)). Simule de novo." -Foreground Red
+    if ($pj.Sid -ne $targetSid) {
+        Write-Host "STOP: the plan belongs to another user ($($pj.Sid)). Simulate again." -Foreground Red
         return
     }
-    $noPlano = @($pj.Alvos | ForEach-Object { "$($_.Tipo)|$($_.Alvo)" })
-    $aplicar = @($alvos | Where-Object { $noPlano -contains "$($_.Tipo)|$($_.Alvo)" } | Sort-Object Ordem)
-    foreach ($x in @($alvos | Where-Object { $noPlano -notcontains "$($_.Tipo)|$($_.Alvo)" })) {
-        Write-Host "FORA DO PLANO (nao sera tocado): $($x.Tipo) '$($x.Alvo)'" -Foreground Yellow
+    $inPlan = @($pj.Targets | ForEach-Object { "$($_.Kind)|$($_.Target)" })
+    $toApply = @($targets | Where-Object { $inPlan -contains "$($_.Kind)|$($_.Target)" } | Sort-Object Order)
+    foreach ($x in @($targets | Where-Object { $inPlan -notcontains "$($_.Kind)|$($_.Target)" })) {
+        Write-Host "OUTSIDE THE PLAN (will not be touched): $($x.Kind) '$($x.Target)'" -Foreground Yellow
     }
 
-    # --- backup dos fundos de video ANTES de remover o Appx (que apaga a pasta) ---
-    $fontes = @("$L\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Backgrounds\Uploads",
+    # --- back up video backgrounds BEFORE removing the Appx (which deletes the folder) ---
+    $sources = @("$L\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\Backgrounds\Uploads",
                 "$R\Microsoft\Teams\Backgrounds\Uploads")
-    foreach ($bg in $fontes) {
+    foreach ($bg in $sources) {
         if (Test-Path -LiteralPath $bg) {
             try {
-                $fundosEm = Join-Path $saida "teams-fundos-$ts"
-                New-Item -ItemType Directory -Path $fundosEm -Force -ErrorAction Stop | Out-Null
-                Copy-Item -Path (Join-Path $bg '*') -Destination $fundosEm -Recurse -Force -ErrorAction Stop
-            } catch { Write-Host "AVISO: backup dos fundos falhou: $($_.Exception.Message)" -Foreground Yellow }
+                $backgroundsDir = Join-Path $outDir "teams-backgrounds-$ts"
+                New-Item -ItemType Directory -Path $backgroundsDir -Force -ErrorAction Stop | Out-Null
+                Copy-Item -Path (Join-Path $bg '*') -Destination $backgroundsDir -Recurse -Force -ErrorAction Stop
+            } catch { Write-Host "WARNING: background backup failed: $($_.Exception.Message)" -Foreground Yellow }
         }
     }
 
-    foreach ($a in $aplicar) {
+    foreach ($a in $toApply) {
         $res = 'OK'
         try {
-            switch ($a.Tipo) {
-                'Processo'   { Get-Process -Name $a.Alvo -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+            switch ($a.Kind) {
+                'Process'    { Get-Process -Name $a.Target -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
                                Start-Sleep -Milliseconds 500 }
-                'MSI'        { $pr = Start-Process msiexec.exe -ArgumentList "/x $($a.Alvo) /qn /norestart" -Wait -PassThru -ErrorAction Stop
-                               if (@(0,1605,3010) -notcontains $pr.ExitCode) { throw "msiexec saiu com $($pr.ExitCode)" } }
-                'Appx'       { if ($isAdmin) { Remove-AppxPackage -Package $a.Alvo -AllUsers -ErrorAction Stop }
-                               else          { Remove-AppxPackage -Package $a.Alvo -ErrorAction Stop } }
-                'AppxProv'   { Remove-AppxProvisionedPackage -Online -PackageName $a.Alvo -ErrorAction Stop | Out-Null }
-                'Pasta'      { if (Test-Path -LiteralPath $a.Alvo) { Remove-Item -LiteralPath $a.Alvo -Recurse -Force -ErrorAction Stop }
-                               else { $res = 'OK (ja tinha sumido)' } }
-                'RegChave'   { Remove-Item -LiteralPath $a.Alvo -Recurse -Force -ErrorAction Stop }
-                'RegValor'   { $k,$v = $a.Alvo -split '\|',2
+                'MSI'        { $pr = Start-Process msiexec.exe -ArgumentList "/x $($a.Target) /qn /norestart" -Wait -PassThru -ErrorAction Stop
+                               if (@(0,1605,3010) -notcontains $pr.ExitCode) { throw "msiexec exited with $($pr.ExitCode)" } }
+                'Appx'       { if ($isAdmin) { Remove-AppxPackage -Package $a.Target -AllUsers -ErrorAction Stop }
+                               else          { Remove-AppxPackage -Package $a.Target -ErrorAction Stop } }
+                'AppxProv'   { Remove-AppxProvisionedPackage -Online -PackageName $a.Target -ErrorAction Stop | Out-Null }
+                'Folder'     { if (Test-Path -LiteralPath $a.Target) { Remove-Item -LiteralPath $a.Target -Recurse -Force -ErrorAction Stop }
+                               else { $res = 'OK (already gone)' } }
+                'RegKey'     { Remove-Item -LiteralPath $a.Target -Recurse -Force -ErrorAction Stop }
+                'RegValue'   { $k,$v = $a.Target -split '\|',2
                                Remove-ItemProperty -LiteralPath $k -Name $v -Force -ErrorAction Stop }
-                'Credencial' { $r = cmdkey /delete:"$($a.Alvo)" 2>&1
+                'Credential' { $r = cmdkey /delete:"$($a.Target)" 2>&1
                                if ($LASTEXITCODE -ne 0) { throw "cmdkey: $r" } }
             }
         } catch {
-            $falhas++
-            $res = "FALHA: $($_.Exception.Message)"
+            $failures++
+            $res = "FAILED: $($_.Exception.Message)"
         }
-        $a | Add-Member -NotePropertyName Resultado -NotePropertyValue $res -Force
+        $a | Add-Member -NotePropertyName Result -NotePropertyValue $res -Force
         $a | Export-Csv $log -Append -NoTypeInformation -Encoding UTF8
     }
-    Remove-Item -LiteralPath $plano -Force -ErrorAction SilentlyContinue   # plano se autoconsome
+    Remove-Item -LiteralPath $planFile -Force -ErrorAction SilentlyContinue   # the plan consumes itself
 }
 
-# ---------- REINSTALACAO ----------
-$instalou = 'nao tentado'
-if ($Execute -and $Reinstalar) {
+# ---------- REINSTALL ----------
+$installResult = 'not attempted'
+if ($Execute -and $Reinstall) {
     Write-Host ""
-    Write-Host "Reinstalando o Teams..." -Foreground Cyan
+    Write-Host "Reinstalling Teams..." -Foreground Cyan
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $ProgressPreference = 'SilentlyContinue'   # escopo do script; deixa o download 10x mais rapido no 5.1
+    $ProgressPreference = 'SilentlyContinue'   # script scope; makes the download 10x faster on 5.1
 
-    # 1) winget existe? senao tenta registrar, senao instala do GitHub oficial
+    # 1) does winget exist? if not, try registering it, otherwise install from the official GitHub
     $wg = Get-WingetExe
     if (-not $wg) {
-        Write-Host "winget ausente - tentando registrar o App Installer..." -Foreground Yellow
+        Write-Host "winget missing - trying to register App Installer..." -Foreground Yellow
         try { Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop } catch {}
         Start-Sleep -Seconds 3
         $wg = Get-WingetExe
     }
     if (-not $wg) {
-        Write-Host "winget ausente - baixando do GitHub da Microsoft..." -Foreground Yellow
+        Write-Host "winget missing - downloading from Microsoft's GitHub..." -Foreground Yellow
         try {
             $tmp = Join-Path $env:TEMP "winget-inst-$ts"
             New-Item -ItemType Directory -Path $tmp -Force -ErrorAction Stop | Out-Null
@@ -351,58 +361,58 @@ if ($Execute -and $Reinstalar) {
             Add-AppxPackage -Path "$tmp\winget.msixbundle" -ErrorAction Stop
             Start-Sleep -Seconds 3
             $wg = Get-WingetExe
-        } catch { Write-Host "AVISO: instalacao do winget falhou: $($_.Exception.Message)" -Foreground Yellow }
+        } catch { Write-Host "WARNING: winget installation failed: $($_.Exception.Message)" -Foreground Yellow }
     }
 
-    # 2) Teams via winget (fonte 'winget', NAO 'msstore': a Store costuma estar bloqueada em ambiente corporativo)
+    # 2) Teams via winget ('winget' source, NOT 'msstore': the Store is often blocked by policy)
     if ($wg) {
         Write-Host "winget: $wg"
         try {
             & $wg install --id $WingetId --exact --source winget --silent --disable-interactivity `
                 --accept-package-agreements --accept-source-agreements 2>&1 | Out-Host
-            $instalou = "winget saiu com $LASTEXITCODE"
-        } catch { $instalou = "winget falhou: $($_.Exception.Message)" }
-    } else { $instalou = 'winget indisponivel' }
+            $installResult = "winget exited with $LASTEXITCODE"
+        } catch { $installResult = "winget failed: $($_.Exception.Message)" }
+    } else { $installResult = 'winget unavailable' }
 
-    # 3) conferiu? senao fallback oficial: teamsbootstrapper -p (provisiona pra maquina, precisa admin)
+    # 3) did it work? if not, official fallback: teamsbootstrapper -p (provisions for the machine, needs admin)
     Start-Sleep -Seconds 5
     $ok = [bool](@(Get-TeamsAppx) | Where-Object { $_.Name -eq 'MSTeams' }) -or
           [bool](@(Get-TeamsProv) | Where-Object { $_.DisplayName -eq 'MSTeams' })
     if (-not $ok -and $isAdmin) {
-        Write-Host "Teams nao apareceu - usando teamsbootstrapper..." -Foreground Yellow
+        Write-Host "Teams did not show up - using teamsbootstrapper..." -Foreground Yellow
         try {
             $bs = Join-Path $env:TEMP "teamsbootstrapper-$ts.exe"
             Invoke-WebRequest -Uri $BootUrl -OutFile $bs -UseBasicParsing -ErrorAction Stop
             $out = (& $bs -p 2>&1 | Out-String).Trim()
-            $instalou += " | bootstrapper: $out"
-        } catch { $instalou += " | bootstrapper falhou: $($_.Exception.Message)" }
+            $installResult += " | bootstrapper: $out"
+        } catch { $installResult += " | bootstrapper failed: $($_.Exception.Message)" }
         $ok = [bool](@(Get-TeamsProv) | Where-Object { $_.DisplayName -eq 'MSTeams' }) -or
               [bool](@(Get-TeamsAppx) | Where-Object { $_.Name -eq 'MSTeams' })
     }
-    $instalou = if ($ok) { "OK ($instalou)" } else { "NAO REINSTALOU ($instalou) - pedir pelo Company Portal" }
+    $installResult = if ($ok) { "OK ($installResult)" } else { "DID NOT REINSTALL ($installResult) - request it via Company Portal" }
 }
 
-# ============ VERIFICACAO -- ULTIMO BLOCO, NADA DEPOIS ============
-$depois = Get-Estado
-$tab = @(
-  $antes  | Select-Object @{n='Fase';e={'ANTES' }},TeamsNoUsuario,Provisionado,PastaPacote,PastaClassico,MsiTeams
-  $depois | Select-Object @{n='Fase';e={'DEPOIS'}},TeamsNoUsuario,Provisionado,PastaPacote,PastaClassico,MsiTeams
+# ============ VERIFICATION -- LAST BLOCK, NOTHING AFTER IT ============
+$after = Get-State
+$table = @(
+  $before  | Select-Object @{n='Phase';e={'BEFORE'}},TeamsForUser,Provisioned,PackageFolder,ClassicFolder,MsiTeams
+  $after | Select-Object @{n='Phase';e={'AFTER' }},TeamsForUser,Provisioned,PackageFolder,ClassicFolder,MsiTeams
 )
 Write-Host ""
 if (-not $Execute) {
-    Write-Host '### MODO SIMULACAO - NADA FOI ALTERADO ###' -Foreground Yellow
-    if (Test-Path -LiteralPath $plano) { Write-Host "### Plano gravado: $plano (vale $ValidadePlanoMin min) ###" -Foreground Yellow }
-    else { Write-Host '### ATENCAO: o plano NAO foi gravado - a execucao vai recusar ###' -Foreground Red }
-    Write-Host '### Rode:  $global:EXECUTAR = $true; .\Reset-Teams.ps1  ###' -Foreground Yellow
-} elseif ($falhas -gt 0) {
-    Write-Host "### PARCIAL - $falhas de $($aplicar.Count) itens falharam (ver $log) ###" -Foreground Red
+    Write-Host '### SIMULATION MODE - NOTHING WAS CHANGED ###' -Foreground Yellow
+    if (Test-Path -LiteralPath $planFile) { Write-Host "### Plan saved: $planFile (valid for $PlanValidityMin min) ###" -Foreground Yellow }
+    else { Write-Host '### ATTENTION: the plan was NOT saved - the execution will refuse ###' -Foreground Red }
+    Write-Host '### Run:  $global:APPLY = $true; .\Reset-Teams.ps1  ###' -Foreground Yellow
+} elseif ($failures -gt 0) {
+    Write-Host "### PARTIAL - $failures of $($toApply.Count) items failed (see $log) ###" -Foreground Red
 } else {
-    Write-Host "### APLICADO - $($aplicar.Count) itens. Confira ANTES x DEPOIS ###" -Foreground Green
+    Write-Host "### APPLIED - $($toApply.Count) items. Check BEFORE vs AFTER ###" -Foreground Green
 }
-if ($Execute -and $Reinstalar) { Write-Host "Reinstalacao: $instalou" }
-if ($fundosEm) { Write-Host "Fundos de video salvos em: $fundosEm" }
-if ($Execute)  { Write-Host "Esperado no DEPOIS: Provisionado=True, PastaPacote=False (cria no 1o login/abertura do Teams)." }
-$tab | Format-Table -AutoSize | Out-Host
-$csv = Join-Path $saida "verificacao-nuke-teams-$ts.csv"
-$tab | Export-Csv $csv -NoTypeInformation -Encoding UTF8
-if (Test-Path $csv) { Write-Host "Resumo salvo em: $csv" } else { Write-Host "ATENCAO: o CSV NAO foi gravado" -Foreground Red }
+if ($Execute -and $Reinstall) { Write-Host "Reinstall: $installResult" }
+if ($backgroundsDir) { Write-Host "Video backgrounds saved to: $backgroundsDir" }
+if ($Execute)  { Write-Host "Expected in AFTER: Provisioned=True, PackageFolder=False (created on first sign-in/launch of Teams)." }
+$table | Format-Table -AutoSize | Out-Host
+$csv = Join-Path $csvDir "verification-nuke-teams-$ts.csv"
+$table | Export-Csv $csv -NoTypeInformation -Encoding UTF8
+if (Test-Path $csv) { Write-Host "Summary saved to: $csv" } else { Write-Host "ATTENTION: the CSV was NOT saved" -Foreground Red }

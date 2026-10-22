@@ -1,30 +1,29 @@
 <#
 .SYNOPSIS
-    Forca layout ABNT2 (PT-BR) em Windows com idioma EN-US e desativa hotkeys de troca.
+    Forces the ABNT2 (pt-BR) keyboard layout on Windows with en-US display language and disables layout-switch hotkeys.
 
 .DESCRIPTION
-    Resolve o problema de troca automatica de layout de teclado em Windows 10/11
-    com idioma ingles instalado. Aplica tres correcoes:
+    Fixes unwanted automatic keyboard layout switching on Windows 10/11 when the
+    English display language is installed. Applies three changes:
 
-    1. Configura Language List com EN-US + input ABNT2 (codigo 0416:00000416)
-    2. Desativa atalhos Ctrl+Shift e Alt+Shift via registro (Hotkey=3 = desabilitado)
-    3. Forca InputMethodOverride no perfil do usuario para ABNT2
+    1. Sets the user language list to en-US with the ABNT2 input method only (0416:00000416)
+    2. Disables the Ctrl+Shift and Alt+Shift switch hotkeys in the registry (Hotkey=3 = disabled)
+    3. Sets InputMethodOverride in the user profile to ABNT2
 
-    Requer logoff/login apos execucao para ativar as mudancas de registro.
+    A sign-out/sign-in is required after running for the registry changes to take effect.
 
 .EXAMPLE
     .\Fix-KeyboardLayout.ps1
-    # Aplica correcoes e solicita logoff
+    # Applies the changes; sign out and back in afterwards.
 
 .EXAMPLE
     PowerShell -ExecutionPolicy Bypass -File .\Fix-KeyboardLayout.ps1
-    # Execucao direta sem alterar politica permanentemente
+    # Runs once without permanently changing the execution policy.
 
 .NOTES
-    Autor         : Andre Kittler / Casco Digital
-    Versao        : 1.0
-    Requisitos    : PowerShell 5.1+, Windows 10/11
-    Acao          : Logoff/Login obrigatorio apos execucao
+    Version       : 1.0
+    Requirements  : PowerShell 5.1+, Windows 10/11
+    Action        : Sign-out/sign-in required after running
 #>
 
 
