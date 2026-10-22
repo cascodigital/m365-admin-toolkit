@@ -1,10 +1,96 @@
-# M365 Admin Toolkit
+# m365-admin-toolkit
 
-PowerShell scripts for Microsoft 365 support and administration, written for MSP work and day-to-day L1/L2 tickets. Each one exists because the portal or the native cmdlet left a gap: a limit, a blind spot or a manual step that kept coming back. MIT licensed.
+PowerShell scripts for Microsoft 365, Exchange Online and Windows endpoint administration, written for MSP and L1/L2 support work.
 
-Tested on and recommended for **PowerShell 7 (`pwsh`) on Windows**.
+![License](https://img.shields.io/badge/license-MIT-blue) ![PowerShell](https://img.shields.io/badge/PowerShell-7-5391FE) ![Status](https://img.shields.io/badge/status-maintained-blue)
 
-## Exchange Online
+## Overview
+
+Each script exists because the admin portal or the native cmdlet left a gap: a row limit, a blind spot or a
+manual step that kept coming back in support tickets. Examples: message trace that silently truncates at 5,000
+rows, quarantine searches that miss mail from shared mailboxes, inbox rules that `Get-InboxRule` hides, and
+SharePoint migrations that copy but never delete. The scripts close those gaps with explicit checks, previews
+and before/after evidence.
+
+## Features
+
+- Traces mail up to 89 days in real time and builds quarantine/mail-flow evidence packages correlated by MessageId.
+- Audits inbox rules for dead, hidden, corrupt and externally forwarding rules, and removes corrupt ones.
+- Diagnoses full mailboxes and archive problems, and manages shared mailbox permissions and catch-all routing.
+- Purges a message tenant-wide through Compliance Search with confirmation and progress tracking.
+- Collects logon and arbitrary security events from one machine or a whole AD domain into Excel.
+- Searches OneDrive files across a domain through the Microsoft Graph drive search API.
+- Mirrors source-side deletions to SharePoint after an SPMT migration, with deletion thresholds.
+- Resets Teams, new Outlook and the Office identity cache with a plan-then-apply workflow.
+
+## How it works
+
+Scripts are standalone and grouped by area:
+
+```text
+exchange/    Exchange Online (ExchangeOnlineManagement, Security & Compliance)
+security/    Entra ID / Microsoft Graph user operations
+audit/       Windows event logs (WinRM / Event Log RPC) and OneDrive search (Graph)
+sharepoint/  SharePoint Online via Microsoft Graph
+tools/       Local endpoint repair and utilities
+gpo/         GPO backup that prepares domain computers for audit/ scripts
+```
+
+Design decisions shared across the scripts:
+
+- **Preview before change.** State-changing scripts simulate by default, support `-WhatIf`/`-DryRun`, or ask
+  for confirmation. The safety mode of every script is listed under Usage.
+- **Prove the result.** Scripts that change state re-query afterwards or write before/after CSVs.
+- **No silent truncation.** Paged APIs are followed to the end; capped APIs (message trace) are split into
+  smaller windows until each one is under the cap.
+- **Interactive sign-in.** Exchange scripts prompt for the admin UPN at run time; no credentials are stored.
+
+## Requirements
+
+- PowerShell 7 (`pwsh`) on Windows (recommended and tested); a few scripts also run on Windows PowerShell 5.1.
+- Modules, depending on the script: `ExchangeOnlineManagement`, `Microsoft.Graph`, `ImportExcel`,
+  `ActiveDirectory` (RSAT, for domain-wide event collection).
+- Exchange scripts: an Exchange admin role. Several need an active PIM role (Exchange Recipient Administrator);
+  without it, Exchange reports existing mailboxes as not found. `Remove-Email` needs eDiscovery/Compliance
+  Search permissions.
+- Graph scripts: consent for the Microsoft Graph scopes each script requests (users, files, sites).
+- Remote event collection: WinRM and Event Log access on targets (see [gpo/README.md](gpo/README.md)).
+- Endpoint scripts in `tools/`: local administrator for system-wide changes.
+
+## Quick start
+
+1. Install the modules:
+   ```powershell
+   Install-Module ExchangeOnlineManagement, Microsoft.Graph, ImportExcel -Scope CurrentUser
+   ```
+2. Clone the repository:
+   ```powershell
+   git clone https://github.com/cascodigital/m365-admin-toolkit.git
+   cd m365-admin-toolkit
+   ```
+3. Run a read-only audit:
+   ```powershell
+   pwsh -File .\exchange\Audit-InboxRules.ps1 -MailboxAddress user@contoso.com
+   ```
+
+Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`.
+
+## Configuration
+
+There is no shared configuration file; each script takes parameters (see `Get-Help`). Common switches:
+
+| Variable / key | Required | Default | Description |
+|---|---|---|---|
+| `-AdminUPN` | No | prompted | Admin account for Exchange Online sign-in (Exchange scripts) |
+| `$global:APPLY` | No | `$false` | Set to `$true` before running Reset-Teams, Reset-NewOutlook or Enable-SharedSentItemsCopy to apply instead of simulate |
+| `-Execute` | No | off | Applies deletions in Sync-SharePointDeletion (simulation otherwise) |
+| `-MaxDeletePercent` / `-MaxDelete` | No | `10` / `500` | Per-library deletion safety thresholds in Sync-SharePointDeletion |
+| `-DryRun` | No | off | Preview mode for Remove-CorruptInboxRules |
+| `-WhatIf` | No | off | Supported by Set-CatchAllMailbox, Reset-OfficeTenantCache, Sync-SharePointDeletion |
+
+## Usage
+
+### Exchange Online
 
 | Script | What it does |
 |---|---|
@@ -19,13 +105,13 @@ Tested on and recommended for **PowerShell 7 (`pwsh`) on Windows**.
 | [Set-CatchAllMailbox](exchange/Set-CatchAllMailbox.ps1) | Catch-all for one or more domains: InternalRelay, a dynamic exception group covering every mail-enabled recipient type (users, shared mailboxes, groups, contacts) and a transport rule, so only mail to unknown addresses is redirected. Supports `-WhatIf`. |
 | [Remove-Email](exchange/Remove-Email.ps1) | Search & Purge of a specific message across all mailboxes through Compliance Search. Shows the hit count, asks before purging, waits for the purge to finish and reports the result (soft delete, 10 items per mailbox per run). |
 
-## Security
+### Security
 
 | Script | What it does |
 |---|---|
 | [Set-M365Passwords](security/Set-M365Passwords.ps1) | Bulk password reset by domain, with memorable passwords, throttling and a CSV of results. |
 
-## Audit
+### Audit
 
 | Script | What it does |
 |---|---|
@@ -33,13 +119,13 @@ Tested on and recommended for **PowerShell 7 (`pwsh`) on Windows**.
 | [Search-Events](audit/Search-Events.ps1) | Several event IDs in one pass, including archived and rotated `.evtx` files, not just the live log. Remote mode over the Event Log RPC service. One Excel sheet per ID. |
 | [Search-Files](audit/Search-Files.ps1) | Finds files by name or wildcard in one user's OneDrive or across every OneDrive in a domain, through the Microsoft Graph drive search API with full paging. |
 
-## SharePoint
+### SharePoint
 
 | Script | What it does |
 |---|---|
 | [Sync-SharePointDeletion](sharepoint/Sync-SharePointDeletion.ps1) | After a SharePoint Migration Tool run, deletes from SharePoint whatever no longer exists at the source. SPMT copies but never deletes. Simulates by default; aborts if the source is unreachable or empty, and skips any library where planned deletions exceed a threshold (`-MaxDeletePercent`, `-MaxDelete`). |
 
-## Endpoint
+### Endpoint
 
 | Script | What it does |
 |---|---|
@@ -50,21 +136,10 @@ Tested on and recommended for **PowerShell 7 (`pwsh`) on Windows**.
 | [Show-DiskUsage](tools/Show-DiskUsage.ps1) | TreeSize-style viewer with no install. Reports physical allocated size, so compression, sparse files, hard links and cloud-only OneDrive files are counted correctly. |
 | [Fix-KeyboardLayout](tools/Fix-KeyboardLayout.ps1) | Forces the ABNT2 layout on English Windows and disables the Alt+Shift and Ctrl+Shift switch hotkeys. |
 
-The `gpo/` folder holds a GPO backup (logon auditing plus WinRM and firewall rules for remote collection), ready for `Import-GPO`. See [gpo/README.md](gpo/README.md) before importing.
+The `gpo/` folder holds a GPO backup (logon auditing plus WinRM and firewall rules for remote collection), ready
+for `Import-GPO` or GPMC import. See [gpo/README.md](gpo/README.md) before importing.
 
-## Getting started
-
-```powershell
-Install-Module ExchangeOnlineManagement, Microsoft.Graph, ImportExcel -Scope CurrentUser
-
-git clone https://github.com/cascodigital/m365-admin-toolkit.git
-cd m365-admin-toolkit
-pwsh -File .\exchange\Audit-InboxRules.ps1 -MailboxAddress user@contoso.com
-```
-
-Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`.
-
-## Before you run
+### Safety mode per script
 
 > [!WARNING]
 > **Not every script previews first.** Check the safety mode below before running anything that changes the tenant or the machine.
@@ -82,3 +157,15 @@ Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`
 - **Bulk deletes:** `Remove-Email` purges the message from every mailbox (soft delete: only an admin can recover it, from Recoverable Items). `Sync-SharePointDeletion` deletes files in bulk; they go to the site recycle bin.
 - `Set-M365Passwords` writes passwords to a plain-text CSV.
 - Exchange scripts ask for the admin UPN at run time. Several need an active PIM role (Exchange Recipient Administrator); without it, Exchange reports existing mailboxes as not found.
+
+## Limitations
+
+- Windows only; scripts rely on Windows PowerShell modules, the registry, Appx and Windows event logs.
+- Most scripts are built for interactive use by an administrator (prompts, menus, GUI), not unattended automation.
+- `Remove-Email` is subject to Compliance Search purge limits (soft delete, 10 items per mailbox per run).
+- `Fix-KeyboardLayout` targets the Brazilian ABNT2 layout specifically.
+- The GPO backup uses placeholder domain identifiers and pt-BR built-in group names; review before import.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
