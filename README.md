@@ -43,7 +43,7 @@ Design decisions shared across the scripts:
 - **Prove the result.** Scripts that change state re-query afterwards or write before/after CSVs.
 - **No silent truncation.** Paged APIs are followed to the end; capped APIs (message trace) are split into
   smaller windows until each one is under the cap.
-- **Interactive sign-in.** Exchange scripts prompt for the admin UPN at run time; no credentials are stored.
+- **Interactive sign-in.** Exchange scripts take the admin UPN as a parameter or prompt for it; no credentials are stored.
 
 ## Requirements
 
@@ -70,7 +70,7 @@ Design decisions shared across the scripts:
    ```
 3. Run a read-only audit:
    ```powershell
-   pwsh -File .\exchange\Audit-InboxRules.ps1 -MailboxAddress user@contoso.com
+   pwsh -File .\exchange\Audit-InboxRules.ps1 -MailboxAddress user@contoso.com -AdminUPN admin@contoso.com
    ```
 
 Every script has built-in help: `Get-Help .\exchange\Audit-InboxRules.ps1 -Full`.
@@ -81,7 +81,7 @@ There is no shared configuration file; each script takes parameters (see `Get-He
 
 | Variable / key | Required | Default | Description |
 |---|---|---|---|
-| `-AdminUPN` | No | prompted | Admin account for Exchange Online sign-in (Exchange scripts) |
+| `-AdminUPN` | Varies | prompted | Admin account for Exchange Online sign-in. Named `-UPN` in Invoke-MailFlowForensics and `-Admin` in Manage-ArchiveAutoExpand |
 | `$global:APPLY` | No | `$false` | Set to `$true` before running Reset-Teams, Reset-NewOutlook or Enable-SharedSentItemsCopy to apply instead of simulate |
 | `-Execute` | No | off | Applies deletions in Sync-SharePointDeletion (simulation otherwise) |
 | `-MaxDeletePercent` / `-MaxDelete` | No | `10` / `500` | Per-library deletion safety thresholds in Sync-SharePointDeletion |
@@ -156,7 +156,7 @@ for `Import-GPO` or GPMC import. See [gpo/README.md](gpo/README.md) before impor
 
 - **Bulk deletes:** `Remove-Email` purges the message from every mailbox (soft delete: only an admin can recover it, from Recoverable Items). `Sync-SharePointDeletion` deletes files in bulk; they go to the site recycle bin.
 - `Set-M365Passwords` writes passwords to a plain-text CSV.
-- Exchange scripts ask for the admin UPN at run time. Several need an active PIM role (Exchange Recipient Administrator); without it, Exchange reports existing mailboxes as not found.
+- Exchange scripts take the admin UPN as a parameter or prompt for it. Remove-CorruptInboxRules and Enable-SharedSentItemsCopy need an existing `Connect-ExchangeOnline` session; Remove-Email signs in through `Connect-IPPSSession`. Several need an active PIM role (Exchange Recipient Administrator); without it, Exchange reports existing mailboxes as not found.
 
 ## Limitations
 
