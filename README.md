@@ -85,7 +85,7 @@ There is no shared configuration file; each script takes parameters (see `Get-He
 | `$global:APPLY` | No | `$false` | Set to `$true` before running Reset-Teams, Reset-NewOutlook or Enable-SharedSentItemsCopy to apply instead of simulate |
 | `-Execute` | No | off | Applies deletions in Sync-SharePointDeletion (simulation otherwise) |
 | `-MaxDeletePercent` / `-MaxDelete` | No | `10` / `500` | Per-library deletion safety thresholds in Sync-SharePointDeletion |
-| `-DryRun` | No | off | Preview mode for Remove-CorruptInboxRules |
+| `-DryRun` | No | off | Preview mode for Remove-CorruptInboxRules (alias `-WhatIf`) |
 | `-WhatIf` | No | off | Supported by Set-CatchAllMailbox, Reset-OfficeTenantCache, Sync-SharePointDeletion |
 
 ## Usage
@@ -97,7 +97,7 @@ There is no shared configuration file; each script takes parameters (see `Get-He
 | [Get-MessageTraceGUI](exchange/Get-MessageTraceGUI.ps1) | Message trace GUI with hop-by-hop detail. Searches up to 89 days in real time through `Get-MessageTraceV2`, with no Historical Search queue. Splits the range into windows and subdivides any window that hits the 5,000-row cap, so nothing goes missing without a warning. |
 | [Invoke-MailFlowForensics](exchange/Invoke-MailFlowForensics.ps1) | Answers "my email went to quarantine" with an evidence package covering trace, quarantine, allow/block lists, junk settings and inbox rules. Correlates by MessageId, because quarantine indexes the header From and trace indexes the envelope sender, so searching by sender returns nothing for shared mailboxes, aliases and automations. |
 | [Audit-InboxRules](exchange/Audit-InboxRules.ps1) | Read-only inbox rule audit. Finds what the Outlook rule list hides: rules made dead by an earlier rule with the same condition and *stop processing*, hidden user rules, rules that delete NDRs and quota warnings, corrupt rules, and external forwarding checked against the tenant's accepted domains. |
-| [Remove-CorruptInboxRules](exchange/Remove-CorruptInboxRules.ps1) | Removes rules that `Get-InboxRule` reports only as a "contains errors" warning and never returns as objects. Counts the warnings before and after as proof. Takes the rule names as a parameter. Supports `-DryRun`. |
+| [Remove-CorruptInboxRules](exchange/Remove-CorruptInboxRules.ps1) | Removes rules that `Get-InboxRule` reports only as a "contains errors" warning and never returns as objects. Pulls the rule names from those warnings (or takes them with `-CorruptRules`), backs up the readable rules, asks for YES and counts the warnings before and after as proof. Supports `-DryRun`. |
 | [Get-MailboxFolderSize](exchange/Get-MailboxFolderSize.ps1) | Read-only diagnosis for a full mailbox. Shows why archiving is not freeing space (holds, MRM disabled, orphaned tags, overdue folders), estimates GB per day and projects each folder's size under a 30-day tag. |
 | [Manage-ArchiveAutoExpand](exchange/Manage-ArchiveAutoExpand.ps1) | Checks licence, archive and current state, enables auto-expanding archive only when it can help, then re-queries to prove the change. Loops over several mailboxes. |
 | [Manage-SharedMailbox](exchange/Manage-SharedMailbox.ps1) | Full Access, Send As and Send on Behalf in one menu, listing current holders before any change. |
@@ -149,8 +149,7 @@ for `Import-GPO` or GPMC import. See [gpo/README.md](gpo/README.md) before impor
 | **Simulates by default.** Apply with `$global:APPLY = $true; .\script.ps1` | Reset-Teams, Reset-NewOutlook, Enable-SharedSentItemsCopy |
 | **Simulates by default.** Apply with `-Execute` | Sync-SharePointDeletion |
 | **Supports `-WhatIf`** | Set-CatchAllMailbox, Reset-OfficeTenantCache, Sync-SharePointDeletion |
-| **Applies by default.** Preview with `-DryRun` | Remove-CorruptInboxRules |
-| **Asks for confirmation** before changing anything | Remove-Email, Set-M365Passwords, Manage-ArchiveAutoExpand, Manage-SharedMailbox |
+| **Asks for confirmation** before changing anything | Remove-CorruptInboxRules (preview with `-DryRun`), Remove-Email, Set-M365Passwords, Manage-ArchiveAutoExpand, Manage-SharedMailbox |
 | **Applies immediately, no preview** | Fix-KeyboardLayout, Install-Visio |
 | **Read-only** | Every other script |
 
